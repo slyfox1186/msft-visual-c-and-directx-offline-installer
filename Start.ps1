@@ -25,6 +25,9 @@ param(
 
     [switch]$KeepDownloads,
 
+    [AllowEmptyString()]
+    [string]$ReportPath = '',
+
     [Alias('h', 'Help')]
     [switch]$ShowHelp,
 
@@ -45,6 +48,9 @@ function Invoke-MicrosoftRuntimeLauncher {
         [string[]]$VisualCppVersions = 'All',
 
         [switch]$KeepDownloads,
+
+        [AllowEmptyString()]
+        [string]$ReportPath = '',
 
         [switch]$ShowHelp,
 
@@ -84,6 +90,23 @@ $downloadedLauncherPath = Join-Path ([IO.Path]::GetTempPath()) 'msri.ps1'
 $shouldDeleteSelf = -not [string]::IsNullOrWhiteSpace($PSCommandPath) -and
     [string]::Equals([IO.Path]::GetFullPath($PSCommandPath), [IO.Path]::GetFullPath($downloadedLauncherPath), [StringComparison]::OrdinalIgnoreCase)
 
+function Get-LauncherStatusBadge {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('INFO', 'DOWNLOAD', 'OK', 'FAILED', 'CLEANUP')]
+        [string]$State
+    )
+
+    $badgeWidth = 8
+    $totalPadding = $badgeWidth - $State.Length
+    $leftPadding = [math]::Floor($totalPadding / 2)
+    $rightPadding = $totalPadding - $leftPadding
+
+    return '[' + (' ' * $leftPadding) + $State + (' ' * $rightPadding) + ']'
+}
+
 function Write-LauncherStatus {
     param(
         [Parameter(Mandatory = $true)]
@@ -99,7 +122,7 @@ function Write-LauncherStatus {
     if ($State -eq 'FAILED') { $color = [ConsoleColor]::Red }
     if ($State -eq 'CLEANUP') { $color = [ConsoleColor]::DarkCyan }
     $timestamp = [datetime]::Now.ToString('HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
-    $prefix = '[{0}] [{1,-8}] ' -f $timestamp, $State
+    $prefix = '[{0}] {1} ' -f $timestamp, (Get-LauncherStatusBadge -State $State)
     $continuationPrefix = ' ' * $prefix.Length
     $currentPrefix = $prefix
     $remainingMessage = $Message.Trim()
@@ -139,6 +162,7 @@ function Write-LauncherHelp {
     Write-Host '  -DotNetChannels <list>      All, or supported channels such as 8.0,10.0'
     Write-Host '  -VisualCppVersions <list>   All, 2005, 2008, 2010, 2012, 2013, or v14'
     Write-Host '  -KeepDownloads              Keep the Microsoft installer workspace'
+    Write-Host '  -ReportPath <path>          Write a UTF-8 .txt diagnostic report'
     Write-Host '  -h | -Help | --help         Show help without UAC or downloads'
     Write-Host ''
     Write-Host 'With no selection options, an interactive package menu opens.'
@@ -146,6 +170,7 @@ function Write-LauncherHelp {
     Write-Host '.NET resolves the latest stable SDK in each selected supported channel.'
     Write-Host 'Visual C++ v14 tracks Microsoft''s latest supported release.'
     Write-Host 'Legacy Visual C++ and DirectX packages are final fixed releases.'
+    Write-Host 'Every Microsoft package source is resolved when the run starts.'
     Write-Host 'Launcher support files are fetched individually and are always temporary.'
     Write-Host 'KeepDownloads applies only to Microsoft metadata and installer packages.'
     Write-Host 'PowerShell 7 is preferred when pwsh.exe is in PATH; 5.1 is the fallback.'
@@ -367,6 +392,29 @@ function Get-PreferredPowerShellExecutable {
     return $windowsPowerShellPath
 }
 
+function ConvertTo-NativeQuotedArgument {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Value
+    )
+
+    if ($Value -match '[\x00-\x1f"]') {
+        throw 'A native process argument contains a control character or quotation mark.'
+    }
+    $trailingBackslashCount = 0
+    for ($index = $Value.Length - 1; $index -ge 0 -and $Value[$index] -eq '\'; $index--) {
+        $trailingBackslashCount++
+    }
+    $escapedValue = $Value
+    if ($trailingBackslashCount -gt 0) {
+        $escapedValue += '\' * $trailingBackslashCount
+    }
+    return '"' + $escapedValue + '"'
+}
+
 if ($null -ne $RemainingArguments -and $RemainingArguments.Count -gt 0) {
     if ($RemainingArguments.Count -eq 1 -and $RemainingArguments[0] -ceq '--help') {
         $ShowHelp = $true
@@ -404,6 +452,9 @@ try {
     Assert-SafeOptionValue -Name 'ExcludeComponents' -Value $excludedComponentText -Pattern $componentPattern -AllowEmpty
     Assert-SafeOptionValue -Name 'DotNetChannels' -Value $dotNetChannelText -Pattern $dotNetPattern
     Assert-SafeOptionValue -Name 'VisualCppVersions' -Value $visualCppVersionText -Pattern $visualCppPattern
+    if (-not [string]::IsNullOrWhiteSpace($ReportPath) -and $ReportPath -match '[\x00-\x1f"]') {
+        throw 'ReportPath contains a control character or quotation mark.'
+    }
 }
 catch {
     Write-LauncherStatus -State FAILED -Message "Invalid launcher options: $($_.Exception.Message)"
@@ -413,6 +464,15 @@ catch {
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw 'This launcher supports Windows only. Help is available with -Help.'
+}
+
+if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+    try {
+        $ReportPath = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($ReportPath))
+    }
+    catch {
+        throw "Invalid technical report path: $($_.Exception.Message)"
+    }
 }
 
 $normalizedComponents = $componentText -replace '\s', ''
@@ -459,7 +519,7 @@ try {
     $powershellExecutable = Get-PreferredPowerShellExecutable
     $childArguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-        '-File', ('"{0}"' -f $installScriptPath)
+        '-File', (ConvertTo-NativeQuotedArgument -Value $installScriptPath)
     )
     if ($selectionOptionsWereBound.Count -gt 0) {
         $childArguments += @(
@@ -472,6 +532,10 @@ try {
         }
     }
     if ($KeepDownloads) { $childArguments += '-KeepDownloads' }
+    if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+        $childArguments += @('-ReportPath', (ConvertTo-NativeQuotedArgument -Value $ReportPath))
+    }
+    $childArguments += @('-SourceRevision', $commitSha)
 
     $powerShellHostName = [IO.Path]::GetFileName($powershellExecutable)
     Write-LauncherStatus -State INFO -Message "Starting the validated source with $powerShellHostName ..."
@@ -545,4 +609,4 @@ finally {
 exit $finalExitCode
 }
 
-Invoke-MicrosoftRuntimeLauncher -Components $Components -ExcludeComponents $ExcludeComponents -DotNetChannels $DotNetChannels -VisualCppVersions $VisualCppVersions -KeepDownloads:$KeepDownloads -ShowHelp:$ShowHelp -RemainingArguments $RemainingArguments -OriginalBoundParameters $PSBoundParameters
+Invoke-MicrosoftRuntimeLauncher -Components $Components -ExcludeComponents $ExcludeComponents -DotNetChannels $DotNetChannels -VisualCppVersions $VisualCppVersions -KeepDownloads:$KeepDownloads -ReportPath $ReportPath -ShowHelp:$ShowHelp -RemainingArguments $RemainingArguments -OriginalBoundParameters $PSBoundParameters

@@ -1,17 +1,34 @@
 Set-StrictMode -Version 2.0
 
-$script:ConsoleWidth = 78
-$script:StatusBadges = @{
-    Download = '[DOWNLOAD]'
-    Verify   = '[VERIFY  ]'
-    Install  = '[INSTALL ]'
-    Info     = '[INFO    ]'
-    Ok       = '[OK      ]'
-    Restart  = '[RESTART ]'
-    Failed   = '[FAILED  ]'
-    Cleanup  = '[CLEANUP ]'
-    Retained = '[RETAINED]'
+$script:DefaultConsoleWidth = 78
+$script:MinimumConsoleWidth = 72
+$script:MaximumConsoleWidth = 110
+$script:StatusBadgeWidth = 8
+$script:DiagnosticRunId = ''
+$script:DiagnosticEvents = New-Object 'Collections.Generic.List[object]'
+
+function Get-InstallerConsoleWidth {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param()
+
+    $width = $script:DefaultConsoleWidth
+    try {
+        if (-not [Console]::IsOutputRedirected -and [Console]::WindowWidth -gt 1) {
+            $width = [Console]::WindowWidth - 1
+        }
+    }
+    catch {
+        $width = $script:DefaultConsoleWidth
+    }
+
+    return [math]::Min(
+        $script:MaximumConsoleWidth,
+        [math]::Max($script:MinimumConsoleWidth, $width)
+    )
 }
+
+$script:ConsoleWidth = Get-InstallerConsoleWidth
 
 function Format-InstallerByteSize {
     [CmdletBinding()]
@@ -87,7 +104,12 @@ function Get-InstallerStatusBadge {
         [string]$State
     )
 
-    return [string]$script:StatusBadges[$State]
+    $label = $State.ToUpperInvariant()
+    $totalPadding = $script:StatusBadgeWidth - $label.Length
+    $leftPadding = [math]::Floor($totalPadding / 2)
+    $rightPadding = $totalPadding - $leftPadding
+
+    return '[' + (' ' * $leftPadding) + $label + (' ' * $rightPadding) + ']'
 }
 
 function Get-InstallerStatusColor {
@@ -107,6 +129,307 @@ function Get-InstallerStatusColor {
         'Cleanup' { return [ConsoleColor]::DarkCyan }
         default { return [ConsoleColor]::Cyan }
     }
+}
+
+function Add-InstallerDiagnosticEvent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Download', 'Verify', 'Install', 'Info', 'Ok', 'Restart', 'Failed', 'Cleanup', 'Retained', 'Phase')]
+        [string]$State,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    $script:DiagnosticEvents.Add([pscustomobject]@{
+        Timestamp = [datetimeoffset]::Now
+        State     = $State
+        Message   = $Message
+    })
+}
+
+function Initialize-InstallerDiagnostic {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('\A[0-9a-fA-F-]{36}\z')]
+        [string]$RunId
+    )
+
+    $parsedRunId = [guid]::Empty
+    if (-not [guid]::TryParse($RunId, [ref]$parsedRunId)) {
+        throw "Invalid installer diagnostic run ID: $RunId"
+    }
+
+    $script:DiagnosticRunId = $parsedRunId.ToString()
+    $script:DiagnosticEvents = New-Object 'Collections.Generic.List[object]'
+}
+
+function Get-InstallerDiagnosticEvent {
+    [CmdletBinding()]
+    [OutputType([pscustomobject[]])]
+    param()
+
+    return @($script:DiagnosticEvents.ToArray())
+}
+
+function Resolve-InstallerReportPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [AllowEmptyString()]
+        [string]$DestinationPath = '',
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DefaultDirectory,
+
+        [datetime]$Timestamp = [datetime]::Now
+    )
+
+    $fileName = 'Microsoft-Runtime-Installer-Report-{0}.txt' -f $Timestamp.ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
+    $candidate = $DestinationPath.Trim()
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        $candidate = $DefaultDirectory
+    }
+    elseif ($candidate.StartsWith('"', [StringComparison]::Ordinal) -and $candidate.EndsWith('"', [StringComparison]::Ordinal) -and $candidate.Length -ge 2) {
+        $candidate = $candidate.Substring(1, $candidate.Length - 2)
+    }
+    elseif ($candidate.Contains('"')) {
+        throw 'The technical report path contains an unmatched quotation mark.'
+    }
+
+    try {
+        $expandedPath = [Environment]::ExpandEnvironmentVariables($candidate)
+        $fullPath = [IO.Path]::GetFullPath($expandedPath)
+    }
+    catch {
+        throw "Invalid technical report path: $($_.Exception.Message)"
+    }
+
+    $pathIsDirectory = Test-Path -LiteralPath $fullPath -PathType Container
+    $endsWithSeparator = $candidate.EndsWith([IO.Path]::DirectorySeparatorChar) -or
+        $candidate.EndsWith([IO.Path]::AltDirectorySeparatorChar)
+    $extension = [IO.Path]::GetExtension($fullPath)
+    if ($pathIsDirectory -or $endsWithSeparator -or [string]::IsNullOrWhiteSpace($extension)) {
+        if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+            throw "The technical report directory is an existing file: $fullPath"
+        }
+        $fullPath = Join-Path $fullPath $fileName
+    }
+    elseif ($extension -ine '.txt') {
+        throw 'The technical report filename must use the .txt extension.'
+    }
+
+    if (Test-Path -LiteralPath $fullPath) {
+        throw "The technical report file already exists: $fullPath"
+    }
+
+    return $fullPath
+}
+
+function ConvertTo-InstallerReportText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [AllowNull()]
+        [object]$Value,
+
+        [Parameter(Mandatory = $true)]
+        [Collections.IDictionary]$Context
+    )
+
+    $text = [string]$Value
+    $text = $text.Replace("`r", ' ').Replace("`n", ' ')
+    foreach ($pathKey in @('UserProfilePath', 'TempPath')) {
+        if (-not $Context.Contains($pathKey)) { continue }
+        $literalPath = [string]$Context[$pathKey]
+        if ([string]::IsNullOrWhiteSpace($literalPath)) { continue }
+        $replacement = if ($pathKey -eq 'UserProfilePath') { '%USERPROFILE%' } else { '%TEMP%' }
+        $text = [regex]::Replace(
+            $text,
+            [regex]::Escape($literalPath.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)),
+            $replacement,
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+    }
+    return $text
+}
+
+function Assert-InstallerReportContext {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Collections.IDictionary]$Context
+    )
+
+    $requiredKeys = @(
+        'RunId', 'SourceRevision', 'StartedAt', 'CompletedAt', 'Outcome', 'ExitCode',
+        'CompletedPackageCount', 'PlannedPackageCount', 'Duration', 'RestartRequired',
+        'CleanupStatus', 'DownloadsRetained', 'RetainedWorkspacePath', 'FailureMessage',
+        'ComputerName', 'OperatingSystem', 'Architecture', 'PowerShell', 'CurlVersion',
+        'Culture', 'Components', 'DotNetChannels', 'VisualCppVersions', 'ResolvedPackages',
+        'SecurityControls', 'UserProfilePath', 'TempPath'
+    )
+    foreach ($key in $requiredKeys) {
+        if (-not $Context.Contains($key)) {
+            throw "Technical report context is missing required key: $key"
+        }
+    }
+    if ([string]$Context.Outcome -notin @('Success', 'Restart', 'Failed')) {
+        throw "Technical report context contains an invalid outcome: $($Context.Outcome)"
+    }
+}
+
+function Export-InstallerTechnicalReport {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [AllowEmptyString()]
+        [string]$DestinationPath = '',
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DefaultDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [Collections.IDictionary]$Context,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [psobject[]]$Events,
+
+        [datetime]$Timestamp = [datetime]::Now
+    )
+
+    Assert-InstallerReportContext -Context $Context
+    $reportPath = Resolve-InstallerReportPath -DestinationPath $DestinationPath -DefaultDirectory $DefaultDirectory -Timestamp $Timestamp
+    $reportDirectory = Split-Path -Parent $reportPath
+    if (-not (Test-Path -LiteralPath $reportDirectory -PathType Container)) {
+        $null = New-Item -Path $reportDirectory -ItemType Directory -Force -ErrorAction Stop
+    }
+
+    $lines = New-Object 'Collections.Generic.List[string]'
+    $rule = '=' * $script:ConsoleWidth
+    $sectionRule = '-' * $script:ConsoleWidth
+    $outcomeText = ([string]$Context.Outcome).ToUpperInvariant()
+    $restartText = if ([bool]$Context.RestartRequired) { 'Required - restart Windows manually' } else { 'Not required' }
+    $retentionText = if ([bool]$Context.DownloadsRetained) { 'Retained' } else { 'Removed unless cleanup failed' }
+
+    $lines.Add('MICROSOFT RUNTIME INSTALLER - TECHNICAL REPORT')
+    $lines.Add($rule)
+    $lines.Add('Review before external sharing: this report includes a computer name and OS details.')
+    $lines.Add('It intentionally excludes credentials, environment-variable dumps, and package contents.')
+    $lines.Add('')
+    $lines.Add('EXECUTIVE RESULT')
+    $lines.Add($sectionRule)
+    $lines.Add(('Outcome                  : {0}' -f $outcomeText))
+    $lines.Add(('Process exit code        : {0}' -f $Context.ExitCode))
+    $lines.Add(('Packages completed       : {0} of {1}' -f $Context.CompletedPackageCount, $Context.PlannedPackageCount))
+    $lines.Add(('Elapsed time             : {0}' -f (Format-InstallerDuration -Duration ([timespan]$Context.Duration))))
+    $lines.Add(('Restart                  : {0}' -f $restartText))
+    $lines.Add(('Cleanup                  : {0}' -f (ConvertTo-InstallerReportText -Value $Context.CleanupStatus -Context $Context)))
+    $lines.Add('')
+    $lines.Add('RUN IDENTITY')
+    $lines.Add($sectionRule)
+    $lines.Add('Report schema            : 1')
+    $lines.Add(('Run ID                   : {0}' -f (ConvertTo-InstallerReportText -Value $Context.RunId -Context $Context)))
+    $lines.Add(('Source revision          : {0}' -f (ConvertTo-InstallerReportText -Value $Context.SourceRevision -Context $Context)))
+    $lines.Add(('Started (local)          : {0}' -f ([datetimeoffset]$Context.StartedAt).ToString('o', [Globalization.CultureInfo]::InvariantCulture)))
+    $lines.Add(('Completed (local)        : {0}' -f ([datetimeoffset]$Context.CompletedAt).ToString('o', [Globalization.CultureInfo]::InvariantCulture)))
+    $lines.Add(('Completed (UTC)          : {0}' -f ([datetimeoffset]$Context.CompletedAt).UtcDateTime.ToString('o', [Globalization.CultureInfo]::InvariantCulture)))
+    $lines.Add('')
+    $lines.Add('SYSTEM CONTEXT')
+    $lines.Add($sectionRule)
+    $lines.Add(('Computer name            : {0}' -f (ConvertTo-InstallerReportText -Value $Context.ComputerName -Context $Context)))
+    $lines.Add(('Operating system         : {0}' -f (ConvertTo-InstallerReportText -Value $Context.OperatingSystem -Context $Context)))
+    $lines.Add(('Target architecture      : {0}' -f (ConvertTo-InstallerReportText -Value $Context.Architecture -Context $Context)))
+    $lines.Add(('PowerShell               : {0}' -f (ConvertTo-InstallerReportText -Value $Context.PowerShell -Context $Context)))
+    $lines.Add(('curl                     : {0}' -f (ConvertTo-InstallerReportText -Value $Context.CurlVersion -Context $Context)))
+    $lines.Add(('Culture                  : {0}' -f (ConvertTo-InstallerReportText -Value $Context.Culture -Context $Context)))
+    $lines.Add('Elevated                 : Yes')
+    $lines.Add('')
+    $lines.Add('REQUESTED AND RESOLVED PLAN')
+    $lines.Add($sectionRule)
+    $lines.Add(('Components               : {0}' -f (ConvertTo-InstallerReportText -Value $Context.Components -Context $Context)))
+    $lines.Add(('.NET channels            : {0}' -f (ConvertTo-InstallerReportText -Value $Context.DotNetChannels -Context $Context)))
+    $lines.Add(('Visual C++ families      : {0}' -f (ConvertTo-InstallerReportText -Value $Context.VisualCppVersions -Context $Context)))
+    $lines.Add(('Resolved package count   : {0}' -f @($Context.ResolvedPackages).Count))
+    if (@($Context.ResolvedPackages).Count -eq 0) {
+        $lines.Add('  No package list was resolved before the run stopped.')
+    }
+    else {
+        foreach ($packageLine in @($Context.ResolvedPackages)) {
+            $lines.Add(('  {0}' -f (ConvertTo-InstallerReportText -Value $packageLine -Context $Context)))
+        }
+    }
+    $lines.Add('')
+    $lines.Add('SECURITY AND CLEANUP')
+    $lines.Add($sectionRule)
+    foreach ($control in @($Context.SecurityControls)) {
+        $lines.Add(('  - {0}' -f (ConvertTo-InstallerReportText -Value $control -Context $Context)))
+    }
+    $lines.Add(('Download retention       : {0}' -f $retentionText))
+    if (-not [string]::IsNullOrWhiteSpace([string]$Context.RetainedWorkspacePath)) {
+        $lines.Add(('Retained workspace       : {0}' -f (ConvertTo-InstallerReportText -Value $Context.RetainedWorkspacePath -Context $Context)))
+    }
+    $lines.Add(('Cleanup result           : {0}' -f (ConvertTo-InstallerReportText -Value $Context.CleanupStatus -Context $Context)))
+    $lines.Add('')
+    $lines.Add('EVENT TIMELINE')
+    $lines.Add($sectionRule)
+    if ($Events.Count -eq 0) {
+        $lines.Add('No structured diagnostic events were captured.')
+    }
+    else {
+        foreach ($diagnosticEvent in $Events) {
+            $eventTimestamp = ([datetimeoffset]$diagnosticEvent.Timestamp).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            $eventState = ([string]$diagnosticEvent.State).ToUpperInvariant().PadRight(8)
+            $eventMessage = ConvertTo-InstallerReportText -Value $diagnosticEvent.Message -Context $Context
+            $lines.Add(('{0} | {1} | {2}' -f $eventTimestamp, $eventState, $eventMessage))
+        }
+    }
+    $lines.Add('')
+    $lines.Add('FAILURE ANALYSIS / NEXT ACTIONS')
+    $lines.Add($sectionRule)
+    if ([string]$Context.Outcome -eq 'Failed') {
+        $lines.Add(('Failure reason           : {0}' -f (ConvertTo-InstallerReportText -Value $Context.FailureMessage -Context $Context)))
+        $lines.Add('Recommended actions:')
+        $lines.Add('  1. Locate the first FAILED event and the package or phase immediately before it.')
+        $lines.Add('  2. Confirm network access to the reported Microsoft host and sufficient disk space.')
+        $lines.Add('  3. Retry from an Administrator console; attach this report if the failure repeats.')
+    }
+    elseif ([bool]$Context.RestartRequired) {
+        $lines.Add('No installation failure was recorded. Restart Windows manually to finish setup.')
+    }
+    else {
+        $lines.Add('No installation failure or restart requirement was recorded.')
+    }
+    $lines.Add('')
+    $lines.Add($rule)
+    $lines.Add('END OF REPORT')
+
+    $encoding = New-Object Text.UTF8Encoding($true)
+    $fileStream = New-Object IO.FileStream(
+        $reportPath,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None
+    )
+    try {
+        $writer = New-Object IO.StreamWriter($fileStream, $encoding)
+        try {
+            $writer.Write(($lines -join [Environment]::NewLine) + [Environment]::NewLine)
+        }
+        finally {
+            $writer.Dispose()
+        }
+    }
+    finally {
+        $fileStream.Dispose()
+    }
+
+    return $reportPath
 }
 
 function Write-InstallerWrappedLine {
@@ -190,6 +513,7 @@ function Write-InstallerHelp {
     Write-Host '  -DotNetChannels <list>      All, or supported channels such as 8.0,10.0'
     Write-Host '  -VisualCppVersions <list>   All, 2005, 2008, 2010, 2012, 2013, or v14'
     Write-Host '  -KeepDownloads              Keep the Microsoft installer workspace'
+    Write-Host '  -ReportPath <path>          Write a UTF-8 developer/IT .txt report'
     Write-Host '  -h | -Help | --help         Show help without UAC or downloads'
     Write-Host ''
     Write-Host 'RULES' -ForegroundColor Cyan
@@ -197,8 +521,11 @@ function Write-InstallerHelp {
     Write-Host '  * Architecture is automatic and cannot be overridden.'
     Write-Host '  * Explicit .NET channels must still be supported by Microsoft.'
     Write-Host '  * .NET resolves the latest stable SDK in each selected supported channel.'
+    Write-Host '  * .NET latest.version is accepted only with Microsoft SHA-512 metadata.'
     Write-Host '  * Visual C++ v14 tracks Microsoft''s latest supported release.'
     Write-Host '  * Legacy Visual C++ and DirectX packages are final fixed releases.'
+    Write-Host '  * Fixed packages require reviewed SHA-256 and Microsoft signatures.'
+    Write-Host '  * Every Microsoft package source is resolved when the run starts.'
     Write-Host '  * Microsoft progress windows may appear; they require no clicks.'
     Write-Host '  * Packages never restart Windows automatically.'
     Write-Host '  * Downloads are removed by default, including after failures.'
@@ -208,6 +535,7 @@ function Write-InstallerHelp {
     Write-Host '  .\Install.ps1 -Components DotNet,DirectX -DotNetChannels 8.0,10.0'
     Write-Host '  .\Install.ps1 -Components VisualCpp -VisualCppVersions 2013,v14'
     Write-Host '  .\Install.ps1 -ExcludeComponents DirectX -KeepDownloads'
+    Write-Host '  .\Install.ps1 -Components DotNet -ReportPath "$env:USERPROFILE"'
     Write-Host ''
     Write-Host 'EXIT CODES' -ForegroundColor Cyan
     Write-Host '  0     Completed successfully'
@@ -347,11 +675,11 @@ function Write-InstallerSelectionMenu {
     Write-Host $countText -ForegroundColor $countColor
     Write-Host '  Press 1, 2, or 3 to turn a package group on or off.' -ForegroundColor Gray
     Write-Host ''
-    Write-InstallerPackageChoice -Key 1 -Enabled ([bool]$SelectedComponents.DotNet) -Label '.NET SDKs' -Detail 'Latest stable SDK in every selected supported channel'
+    Write-InstallerPackageChoice -Key 1 -Enabled ([bool]$SelectedComponents.DotNet) -Label '.NET SDKs' -Detail 'Latest stable SDK in each selected supported channel'
     Write-Host ''
-    Write-InstallerPackageChoice -Key 2 -Enabled ([bool]$SelectedComponents.VisualCpp) -Label 'Visual C++ Redistributables' -Detail 'Latest v14 plus final legacy releases (2005-2013)'
+    Write-InstallerPackageChoice -Key 2 -Enabled ([bool]$SelectedComponents.VisualCpp) -Label 'Visual C++ Redistributables' -Detail 'Latest supported v14 plus final 2005-2013 releases'
     Write-Host ''
-    Write-InstallerPackageChoice -Key 3 -Enabled ([bool]$SelectedComponents.DirectX) -Label 'DirectX Legacy Runtime' -Detail 'Final Microsoft June 2010 release'
+    Write-InstallerPackageChoice -Key 3 -Enabled ([bool]$SelectedComponents.DirectX) -Label 'DirectX Legacy Runtime' -Detail 'Final June 2010 legacy release'
     Write-Host ''
     Write-Host ''
     Write-Host '  OPTIONAL SETTINGS' -ForegroundColor Cyan
@@ -608,30 +936,39 @@ function Write-InstallerSystemSummary {
         [string]$CurlVersion,
 
         [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath,
-
-        [Parameter(Mandatory = $true)]
         [int]$DotNetPackageCount,
 
         [Parameter(Mandatory = $true)]
         [int]$VisualCppPackageCount,
 
         [Parameter(Mandatory = $true)]
-        [bool]$DirectXSelected
+        [bool]$DirectXSelected,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$FixedHashPackageCount,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$RollingVisualCppSelected
     )
 
     $powerShellDisplay = $PowerShellVersion
     if (-not [string]::IsNullOrWhiteSpace($PowerShellEdition)) {
         $powerShellDisplay = "$PowerShellVersion ($PowerShellEdition)"
     }
-    Write-InstallerStatus -State Info -Message "Windows architecture: $Architecture | PowerShell: $powerShellDisplay"
-    Write-InstallerStatus -State Info -Message "curl: $CurlVersion"
-    Write-InstallerStatus -State Info -Message ("Plan: {0}" -f (Format-InstallerPlan -DotNetPackageCount $DotNetPackageCount -VisualCppPackageCount $VisualCppPackageCount -DirectXSelected $DirectXSelected))
-    Write-InstallerStatus -State Info -Message "Temporary workspace: $WorkspacePath"
-    $trustControls = @('HTTPS-restricted Microsoft downloads')
-    if ($DotNetPackageCount -gt 0) { $trustControls += 'SHA-512 metadata' }
-    if ($VisualCppPackageCount -gt 0 -or $DirectXSelected) { $trustControls += 'Microsoft Authenticode signatures' }
-    Write-InstallerStatus -State Info -Message ("Trust: {0}" -f ($trustControls -join ' | '))
+    Write-InstallerStatus -State Info -Message "System: Windows $Architecture | PowerShell $powerShellDisplay | curl $CurlVersion"
+    Write-InstallerStatus -State Info -Message ("Install plan: {0}" -f (Format-InstallerPlan -DotNetPackageCount $DotNetPackageCount -VisualCppPackageCount $VisualCppPackageCount -DirectXSelected $DirectXSelected))
+    $trustControls = @('approved Microsoft HTTPS sources')
+    if ($DotNetPackageCount -gt 0) { $trustControls += '.NET SHA-512 hashes' }
+    if ($FixedHashPackageCount -gt 0) {
+        $trustControls += 'fixed-package SHA-256 hashes'
+    }
+    if ($VisualCppPackageCount -gt 0 -or $DirectXSelected) {
+        $trustControls += 'Microsoft digital signatures'
+    }
+    if ($RollingVisualCppSelected) { $trustControls += 'v14 version floor' }
+    Write-InstallerStatus -State Info -Message ("Security checks: {0}" -f ($trustControls -join ' | '))
+    Write-InstallerStatus -State Info -Message 'Temporary files: isolated for this run and removed automatically when finished'
 }
 
 function Write-InstallerSection {
@@ -649,9 +986,10 @@ function Write-InstallerSection {
         [string]$Title
     )
 
+    Add-InstallerDiagnosticEvent -State Phase -Message ('Phase {0} of {1}: {2}' -f $Number, $Total, $Title)
     Write-Host ''
     Write-Host ('-' * $script:ConsoleWidth) -ForegroundColor DarkGray
-    Write-Host ('  PHASE {0}/{1}  {2}' -f $Number, $Total, $Title.ToUpperInvariant()) -ForegroundColor Cyan
+    Write-Host ('  PHASE {0} OF {1}  {2}' -f $Number, $Total, $Title.ToUpperInvariant()) -ForegroundColor Cyan
     Write-Host ('-' * $script:ConsoleWidth) -ForegroundColor DarkGray
 }
 
@@ -666,9 +1004,274 @@ function Write-InstallerStatus {
         [string]$Message
     )
 
+    Add-InstallerDiagnosticEvent -State $State -Message $Message
     $timestamp = [datetime]::Now.ToString('HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
-    $prefix = '[{0}] {1} ' -f $timestamp, (Get-InstallerStatusBadge -State $State)
-    Write-InstallerWrappedLine -Prefix $prefix -Text $Message -Color (Get-InstallerStatusColor -State $State)
+    $timestampText = '[{0}] ' -f $timestamp
+    $badge = Get-InstallerStatusBadge -State $State
+    $prefix = $timestampText + $badge + ' '
+    $remainingText = $Message.Trim()
+    $continuationPrefix = ' ' * $prefix.Length
+    $firstLine = $true
+    $messageColor = switch ($State) {
+        'Failed' { [ConsoleColor]::Red }
+        'Restart' { [ConsoleColor]::Yellow }
+        'Retained' { [ConsoleColor]::Yellow }
+        default { [ConsoleColor]::Gray }
+    }
+
+    if ($remainingText.Length -eq 0) {
+        Write-Host $timestampText -ForegroundColor DarkGray -NoNewline
+        Write-Host $badge -ForegroundColor (Get-InstallerStatusColor -State $State)
+        return
+    }
+
+    while ($remainingText.Length -gt 0) {
+        $availableWidth = $script:ConsoleWidth - $prefix.Length
+        if ($availableWidth -lt 1) { $availableWidth = 1 }
+        if ($remainingText.Length -le $availableWidth) {
+            $lineText = $remainingText
+            $remainingText = ''
+        }
+        else {
+            $breakPosition = $remainingText.LastIndexOf(' ', $availableWidth)
+            if ($breakPosition -le 0) { $breakPosition = $availableWidth }
+            $lineText = $remainingText.Substring(0, $breakPosition).TrimEnd()
+            $remainingText = $remainingText.Substring($breakPosition).TrimStart()
+        }
+
+        if ($firstLine) {
+            Write-Host $timestampText -ForegroundColor DarkGray -NoNewline
+            Write-Host $badge -ForegroundColor (Get-InstallerStatusColor -State $State) -NoNewline
+            Write-Host (' ' + $lineText) -ForegroundColor $messageColor
+            $firstLine = $false
+        }
+        else {
+            Write-Host ($continuationPrefix + $lineText) -ForegroundColor $messageColor
+        }
+    }
+}
+
+function Write-InstallerCompletionScreen {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Success', 'Restart', 'Failed')]
+        [string]$Outcome,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$CompletedPackageCount,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$PlannedPackageCount,
+
+        [Parameter(Mandatory = $true)]
+        [timespan]$Duration,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$CleanupSucceeded,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$RestartRequired,
+
+        [bool]$DownloadsRetained = $false,
+
+        [string]$RetainedWorkspacePath = '',
+
+        [string]$Message = '',
+
+        [string]$ReportPath = ''
+    )
+
+    $heading = 'INSTALLATION NEEDS ATTENTION'
+    $headingColor = [ConsoleColor]::Red
+    $resultText = 'FAILED'
+    $resultColor = [ConsoleColor]::Red
+    $summaryText = 'The installer stopped before all selected packages completed.'
+    if ($Outcome -eq 'Success') {
+        $heading = 'INSTALLATION COMPLETED SUCCESSFULLY'
+        $headingColor = [ConsoleColor]::Green
+        $resultText = 'SUCCESS'
+        $resultColor = [ConsoleColor]::Green
+        $summaryText = 'All selected Microsoft runtime packages completed successfully.'
+    }
+    elseif ($Outcome -eq 'Restart') {
+        $heading = 'INSTALLATION COMPLETED - RESTART REQUIRED'
+        $headingColor = [ConsoleColor]::Yellow
+        $resultText = 'SUCCESS - RESTART REQUIRED'
+        $resultColor = [ConsoleColor]::Yellow
+        $summaryText = 'All selected packages completed successfully.'
+    }
+
+    $headingPadding = [math]::Floor(($script:ConsoleWidth - $heading.Length) / 2)
+    Write-Host ('=' * $script:ConsoleWidth) -ForegroundColor Cyan
+    Write-Host ((' ' * $headingPadding) + $heading) -ForegroundColor $headingColor
+    Write-Host ('=' * $script:ConsoleWidth) -ForegroundColor Cyan
+    Write-Host ''
+    Write-Host '  RESULT      ' -NoNewline
+    Write-Host $resultText -ForegroundColor $resultColor
+    Write-Host ('  PACKAGES    {0} of {1} completed' -f $CompletedPackageCount, $PlannedPackageCount)
+    Write-Host ('  ELAPSED     {0}' -f (Format-InstallerDuration -Duration $Duration))
+    if ($RestartRequired -and $Outcome -eq 'Failed') {
+        Write-Host '  RESTART     A completed package requested a restart.' -ForegroundColor Yellow
+    }
+    elseif ($RestartRequired) {
+        Write-Host '  RESTART     Restart Windows manually to finish setup.' -ForegroundColor Yellow
+    }
+    elseif ($Outcome -eq 'Failed') {
+        Write-Host '  RESTART     No restart was reported before the failure.'
+    }
+    else {
+        Write-Host '  RESTART     No restart is required.'
+    }
+    if ($DownloadsRetained) {
+        Write-InstallerWrappedLine -Prefix '  DOWNLOADS   ' -Text "Downloaded files were kept at: $RetainedWorkspacePath" -Color Yellow
+    }
+    elseif ($CleanupSucceeded) {
+        Write-Host '  DOWNLOADS   Temporary downloads were removed.' -ForegroundColor Green
+    }
+    else {
+        Write-Host '  DOWNLOADS   Temporary download cleanup did not complete.' -ForegroundColor Red
+    }
+    Write-Host ''
+    Write-InstallerWrappedLine -Prefix '  ' -Text $summaryText -Color $headingColor
+    if ($Outcome -eq 'Failed') {
+        $failureText = if ([string]::IsNullOrWhiteSpace($Message)) { 'No additional failure detail was recorded.' } else { $Message }
+        Write-InstallerWrappedLine -Prefix '  ERROR       ' -Text $failureText -Color Red
+        Write-Host '  Save the technical report for detailed diagnostics before retrying.' -ForegroundColor Yellow
+    }
+    elseif ($Outcome -eq 'Restart') {
+        Write-Host '  The installer did not restart Windows automatically.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+        Write-InstallerWrappedLine -Prefix '  REPORT DIR  ' -Text (Split-Path -Parent $ReportPath) -Color Green
+        Write-InstallerWrappedLine -Prefix '  REPORT FILE ' -Text (Split-Path -Leaf $ReportPath) -Color Green
+    }
+    Write-Host ''
+    Write-Host ('=' * $script:ConsoleWidth) -ForegroundColor Cyan
+}
+
+function Invoke-InstallerCompletionPrompt {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Success', 'Restart', 'Failed')]
+        [string]$Outcome,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$CompletedPackageCount,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$PlannedPackageCount,
+
+        [Parameter(Mandatory = $true)]
+        [timespan]$Duration,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$CleanupSucceeded,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$RestartRequired,
+
+        [bool]$DownloadsRetained = $false,
+
+        [string]$RetainedWorkspacePath = '',
+
+        [string]$Message = '',
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DefaultReportDirectory,
+
+        [datetime]$Timestamp = [datetime]::Now,
+
+        [scriptblock]$ScreenClearer = { [Console]::Clear() },
+
+        [scriptblock]$KeyProvider = { [Console]::ReadKey($true).KeyChar },
+
+        [scriptblock]$InputProvider = { param($Prompt) Read-Host -Prompt $Prompt },
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ReportExporter,
+
+        [string]$ExistingReportPath = '',
+
+        [string]$InitialReportError = ''
+    )
+
+    $reportPath = $ExistingReportPath
+    $reportSaved = -not [string]::IsNullOrWhiteSpace($reportPath)
+    $reportError = $InitialReportError
+
+    while ($true) {
+        Clear-InstallerScreen -ScreenClearer $ScreenClearer
+        Write-InstallerCompletionScreen -Outcome $Outcome -CompletedPackageCount $CompletedPackageCount -PlannedPackageCount $PlannedPackageCount -Duration $Duration -CleanupSucceeded $CleanupSucceeded -RestartRequired $RestartRequired -DownloadsRetained $DownloadsRetained -RetainedWorkspacePath $RetainedWorkspacePath -Message $Message -ReportPath $reportPath
+
+        if ($reportSaved) {
+            Write-Host ''
+            Write-Host '  The technical report was saved successfully.' -ForegroundColor Green
+            Write-Host '  Press any key to exit when you are ready.' -ForegroundColor Cyan
+            $null = & $KeyProvider
+            return [pscustomobject]@{
+                ReportSaved = $true
+                ReportPath  = $reportPath
+                ReportError = ''
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($reportError)) {
+            Write-Host ''
+            Write-InstallerWrappedLine -Prefix '  REPORT ERROR  ' -Text $reportError -Color Red
+            Write-Host '  Press R to try again, or press any other key to exit.' -ForegroundColor Yellow
+        }
+        else {
+            Write-Host ''
+            Write-Host '  OPTIONAL TECHNICAL REPORT' -ForegroundColor Cyan
+            Write-Host '  Save a developer/IT diagnostic report before closing this window.'
+            Write-Host ''
+            Write-Host '  [ R ]  SAVE TECHNICAL REPORT' -ForegroundColor Green
+            Write-Host '  [ ANY OTHER KEY ]  EXIT' -ForegroundColor Cyan
+        }
+
+        $keyValue = & $KeyProvider
+        $keyText = if ($keyValue -is [ConsoleKeyInfo]) { [string]$keyValue.KeyChar } else { [string]$keyValue }
+        if ($keyText -ine 'R') {
+            return [pscustomobject]@{
+                ReportSaved = $false
+                ReportPath  = ''
+                ReportError = $reportError
+            }
+        }
+
+        $defaultReportPath = Resolve-InstallerReportPath -DestinationPath '' -DefaultDirectory $DefaultReportDirectory -Timestamp $Timestamp
+        Write-Host ''
+        Write-Host '  Enter a folder or a complete .txt filename.' -ForegroundColor Cyan
+        Write-InstallerWrappedLine -Prefix '  FOLDER      ' -Text (Split-Path -Parent $defaultReportPath) -Color Gray
+        Write-InstallerWrappedLine -Prefix '  FILE        ' -Text (Split-Path -Leaf $defaultReportPath) -Color Gray
+        $requestedPath = & $InputProvider 'Report path (press ENTER for the default)'
+        if ($null -eq $requestedPath -or [string]::IsNullOrWhiteSpace([string]$requestedPath)) {
+            $requestedPath = $defaultReportPath
+        }
+
+        try {
+            $resolvedPath = Resolve-InstallerReportPath -DestinationPath ([string]$requestedPath) -DefaultDirectory $DefaultReportDirectory -Timestamp $Timestamp
+            $reportPath = [string](& $ReportExporter $resolvedPath)
+            if ([string]::IsNullOrWhiteSpace($reportPath) -or -not [IO.Path]::IsPathRooted($reportPath)) {
+                throw 'The report exporter did not return a complete report path.'
+            }
+            $reportSaved = $true
+            $reportError = ''
+        }
+        catch {
+            $reportSaved = $false
+            $reportPath = ''
+            $reportError = $_.Exception.Message
+        }
+    }
 }
 
 function Write-InstallerSummary {
@@ -729,9 +1332,15 @@ Export-ModuleMember -Function @(
     'Format-InstallerByteSize',
     'Format-InstallerDuration',
     'Format-InstallerPlan',
+    'Export-InstallerTechnicalReport',
+    'Get-InstallerDiagnosticEvent',
     'Get-InstallerStatusBadge',
+    'Invoke-InstallerCompletionPrompt',
     'Read-InstallerSelection',
+    'Initialize-InstallerDiagnostic',
+    'Resolve-InstallerReportPath',
     'Write-InstallerBanner',
+    'Write-InstallerCompletionScreen',
     'Write-InstallerHelp',
     'Write-InstallerSection',
     'Write-InstallerStatus',

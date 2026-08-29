@@ -22,6 +22,9 @@ param(
 
     [switch]$KeepDownloads,
 
+    [AllowEmptyString()]
+    [string]$ReportPath = '',
+
     [Alias('h', 'Help')]
     [switch]$ShowHelp,
 
@@ -127,12 +130,67 @@ function Get-PreferredPowerShellExecutable {
     return $windowsPowerShellPath
 }
 
+function ConvertTo-NativeQuotedArgument {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Value
+    )
+
+    if ($Value -match '[\x00-\x1f"]') {
+        throw 'A native process argument contains a control character or quotation mark.'
+    }
+    $trailingBackslashCount = 0
+    for ($index = $Value.Length - 1; $index -ge 0 -and $Value[$index] -eq '\'; $index--) {
+        $trailingBackslashCount++
+    }
+    $escapedValue = $Value
+    if ($trailingBackslashCount -gt 0) {
+        $escapedValue += '\' * $trailingBackslashCount
+    }
+    return '"' + $escapedValue + '"'
+}
+
+function Get-CompatibilityStatusBadge {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('INFO', 'FAILED')]
+        [string]$State
+    )
+
+    $badgeWidth = 8
+    $totalPadding = $badgeWidth - $State.Length
+    $leftPadding = [math]::Floor($totalPadding / 2)
+    $rightPadding = $totalPadding - $leftPadding
+
+    return '[' + (' ' * $leftPadding) + $State + (' ' * $rightPadding) + ']'
+}
+
+function Write-CompatibilityStatus {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('INFO', 'FAILED')]
+        [string]$State,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    $color = if ($State -ceq 'FAILED') { [ConsoleColor]::Red } else { [ConsoleColor]::Yellow }
+    Write-Host ('{0} {1}' -f (Get-CompatibilityStatusBadge -State $State), $Message) -ForegroundColor $color
+}
+
 if ($null -ne $RemainingArguments -and $RemainingArguments.Count -gt 0) {
     if ($RemainingArguments.Count -eq 1 -and $RemainingArguments[0] -ceq '--help') {
         $ShowHelp = $true
     }
     else {
-        Write-Host "[FAILED  ] Unknown argument(s): $($RemainingArguments -join ' ')" -ForegroundColor Red
+        Write-CompatibilityStatus -State FAILED -Message "Unknown argument(s): $($RemainingArguments -join ' ')"
         exit 1
     }
 }
@@ -153,9 +211,12 @@ try {
     Assert-SafeOptionValue -Name 'ExcludeComponents' -Value $excludedComponentText -Pattern $componentPattern -AllowEmpty
     Assert-SafeOptionValue -Name 'DotNetChannels' -Value $dotNetChannelText -Pattern $dotNetPattern
     Assert-SafeOptionValue -Name 'VisualCppVersions' -Value $visualCppVersionText -Pattern $visualCppPattern
+    if (-not [string]::IsNullOrWhiteSpace($ReportPath) -and $ReportPath -match '[\x00-\x1f"]') {
+        throw 'ReportPath contains a control character or quotation mark.'
+    }
 }
 catch {
-    Write-Host "[FAILED  ] Invalid compatibility options: $($_.Exception.Message)" -ForegroundColor Red
+    Write-CompatibilityStatus -State FAILED -Message "Invalid compatibility options: $($_.Exception.Message)"
     exit 1
 }
 
@@ -164,9 +225,19 @@ $normalizedExclusions = $excludedComponentText -replace '\s', ''
 $normalizedDotNetChannels = $dotNetChannelText -replace '\s', ''
 $normalizedVisualCppVersions = $visualCppVersionText -replace '\s', ''
 
+if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+    try {
+        $ReportPath = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($ReportPath))
+    }
+    catch {
+        Write-CompatibilityStatus -State FAILED -Message "Invalid technical report path: $($_.Exception.Message)"
+        exit 1
+    }
+}
+
 try {
-    Write-Host '[INFO    ] Bootstrap.ps1 is a compatibility launcher.' -ForegroundColor Yellow
-    Write-Host '[INFO    ] Start.ps1 is the current entry point.' -ForegroundColor Yellow
+    Write-CompatibilityStatus -State INFO -Message 'Bootstrap.ps1 is a compatibility launcher.'
+    Write-CompatibilityStatus -State INFO -Message 'Start.ps1 is the current entry point.'
 
     $localStartPath = Join-Path $PSScriptRoot 'Start.ps1'
     if (Test-Path -LiteralPath $localStartPath -PathType Leaf) {
@@ -207,7 +278,7 @@ try {
     $powershellExecutable = Get-PreferredPowerShellExecutable
     $childArguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-        '-File', ('"{0}"' -f $startPath)
+        '-File', (ConvertTo-NativeQuotedArgument -Value $startPath)
     )
     if ($selectionOptionsWereBound.Count -gt 0) {
         $childArguments += @(
@@ -220,13 +291,16 @@ try {
         }
     }
     if ($KeepDownloads) { $childArguments += '-KeepDownloads' }
+    if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+        $childArguments += @('-ReportPath', (ConvertTo-NativeQuotedArgument -Value $ReportPath))
+    }
     if ($ShowHelp) { $childArguments += '-ShowHelp' }
 
     $childProcess = Start-Process -FilePath $powershellExecutable -ArgumentList $childArguments -NoNewWindow -Wait -PassThru -ErrorAction Stop
     $finalExitCode = $childProcess.ExitCode
 }
 catch {
-    Write-Host "[FAILED  ] $($_.Exception.Message)" -ForegroundColor Red
+    Write-CompatibilityStatus -State FAILED -Message $_.Exception.Message
     $finalExitCode = 1
 }
 finally {
@@ -244,7 +318,7 @@ finally {
             }
         }
         catch {
-            Write-Host "[FAILED  ] Compatibility cleanup failed: $($_.Exception.Message)" -ForegroundColor Red
+            Write-CompatibilityStatus -State FAILED -Message "Compatibility cleanup failed: $($_.Exception.Message)"
             $finalExitCode = 1
         }
     }
@@ -254,7 +328,7 @@ finally {
             Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction Stop
         }
         catch {
-            Write-Host "[FAILED  ] Downloaded compatibility launcher cleanup failed: $($_.Exception.Message)" -ForegroundColor Red
+            Write-CompatibilityStatus -State FAILED -Message "Downloaded compatibility launcher cleanup failed: $($_.Exception.Message)"
             $finalExitCode = 1
         }
     }

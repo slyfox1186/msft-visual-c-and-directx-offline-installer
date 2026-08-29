@@ -2,7 +2,7 @@
 
 A secure, architecture-aware Windows installer for supported Microsoft .NET SDKs, Microsoft Visual C++ redistributables, and the legacy DirectX End-User Runtimes (June 2010).
 
-The project downloads packages directly from Microsoft at runtime. For rolling packages, it resolves the latest stable SDK version for every selected, currently supported .NET channel and the latest supported Visual C++ v14 release when the installation runs. Visual C++ 2005-2013 and DirectX June 2010 are final fixed legacy releases. The repository stores no Microsoft installers and does not pin rolling package versions that would become stale.
+The project downloads packages directly from Microsoft at runtime. It resolves every selected installer from official Microsoft metadata, dedicated Microsoft aliases, documentation, or Download Center pages before any package runs. For rolling packages, it resolves the latest stable SDK version for every selected, currently supported .NET channel and the latest supported Visual C++ v14 release. Visual C++ 2005-2013 and DirectX June 2010 are final fixed legacy releases, but even their payload URLs are resolved at run time rather than stored in the repository. The repository stores no Microsoft installers or installer URLs and does not pin rolling package versions that would become stale.
 
 > The repository name is retained for continuity with the original offline project. This GitHub version is online-only. The separate Google Drive offline package remains available through the [original Reddit post](https://www.reddit.com/r/Batch/comments/1mwbttn/comment/p6iy6km/).
 
@@ -73,6 +73,7 @@ The complete help menu remains available without elevation or downloads:
 | `-DotNetChannels` | `All` or stable channel numbers such as `8.0,10.0` | `All` | Installs only requested channels that Microsoft still supports. |
 | `-VisualCppVersions` | `All`, `2005`, `2008`, `2010`, `2012`, `2013`, `v14` | `All` | Selects Visual C++ release families. |
 | `-KeepDownloads` | switch | off | Retains the installer workspace, including downloaded metadata and packages, and prints its path. |
+| `-ReportPath` | folder or `.txt` path | none | Writes a timestamped technical report to a folder, or writes the requested `.txt` filename. Interactive runs can choose this from the final screen. |
 | `-h`, `-Help`, `--help` | switch | off | Shows syntax, rules, examples, and exit codes without UAC or network activity. |
 
 Values are case-insensitive. `All` must be used by itself, duplicate values are rejected, and fine-grained filters cannot target disabled components. Architecture cannot be overridden.
@@ -95,11 +96,12 @@ x64 Windows receives both Visual C++ architectures because 64-bit Windows can ru
 
 ## How versions stay current
 
-- **.NET SDKs are dynamic.** Every run downloads Microsoft's current release index, keeps only supported LTS or STS channels in active or maintenance support, rejects preview version strings, and selects each channel's published `latest-sdk` installer for the detected Windows architecture.
-- **Visual C++ v14 is dynamic.** Microsoft's permanent v14 links resolve to its latest supported x86 and x64 redistributables at download time.
-- **Legacy packages are fixed by design.** Visual C++ 2005-2013 and DirectX June 2010 are Microsoft's final fixed legacy releases, so there is no newer rolling stable version to discover. The installer retrieves those final packages from their official Microsoft endpoints.
+- **.NET SDKs are dynamic.** Every run uses Microsoft's release index to keep only supported LTS or STS channels in active or maintenance support. It checks each channel's dedicated `latest.version` endpoint and uses that version when the same SDK appears in Microsoft's SHA-512-bearing release metadata. If Microsoft's CDNs are briefly out of sync, it uses the newest stable SDK that can be verified by the release metadata instead of downloading an unverifiable file. Preview strings are rejected.
+- **Visual C++ v14 is dynamic.** Every run uses Microsoft's dedicated latest-supported x86 and x64 aliases. After Microsoft digital-signature verification, the installer reads the executable's file version and rejects an unexpected shape, the retired `14.0` line, or a downgrade below the reviewed security floor.
+- **Visual C++ 2005-2013 are final releases with dynamic source resolution.** Visual C++ 2013 uses Microsoft's permanent architecture aliases. The 2008-2012 resolver isolates the requested release-family section and architecture row in Microsoft's current documentation. Visual C++ 2005 is resolved by exact filename from its official Download Center page because Microsoft does not publish a payload row for that family in the documentation.
+- **DirectX June 2010 is fixed with dynamic source resolution.** The resolver extracts exactly one matching package URL from the official Download Center page at run time. The release itself is fixed; the source URL is not stored in the repository.
 
-The terminal identifies these policies before installation and prints the concrete .NET SDK version in every resolved package name. This distinction prevents “latest” from being used misleadingly for legacy products that no longer have rolling releases.
+The complete selected source plan must resolve successfully before any package executable runs. Missing, ambiguous, non-HTTPS, unexpected-host, wrong-architecture, or malformed catalog results fail closed. Fixed Visual C++ and DirectX packages must also match reviewed SHA-256 values, so a changed catalog page or re-hosted file cannot silently change the bytes that execute. The terminal identifies each policy before installation and prints concrete .NET and downloaded Visual C++ file versions. This distinction prevents “latest” from being used misleadingly for legacy products that no longer have rolling releases.
 
 ## Security and reliability controls
 
@@ -108,15 +110,19 @@ The installer:
 - invokes the real `curl.exe`, not PowerShell's historical `curl` alias;
 - resolves one GitHub commit, validates its 40-character SHA, and downloads the fixed source manifest as individual raw files rather than an archive;
 - requires HTTPS, limits redirects, uses timeouts and retries, and rejects non-approved effective hosts;
-- parses Microsoft's .NET JSON as structured data and accepts only stable version, architecture, filename, URL, and SHA-512 formats;
+- keeps discovery-page hosts separate from executable-download hosts, limits catalog document size, and requires exactly one regex-extracted payload candidate for the requested family, architecture, and filename;
+- parses Microsoft's .NET JSON as structured data, checks the dedicated stable-version endpoint, and accepts only stable version, architecture, filename, URL, and SHA-512 formats;
 - compares each .NET SDK file against Microsoft's published SHA-512 digest;
-- requires valid Microsoft Corporation Authenticode signatures for Visual C++ and DirectX packages before execution;
+- compares every fixed Visual C++ and DirectX download against its reviewed SHA-256 digest before checking its digital signature;
+- requires valid Microsoft Corporation Authenticode signatures for Visual C++ and DirectX packages before execution, reads Visual C++ PE version metadata only after signature validation, and enforces a reviewed minimum version for rolling v14 packages;
 - runs packages sequentially, displays supported passive progress UI, and reports the exact package and exit code on failure;
 - accepts successful restart codes without silently losing the restart requirement;
 - suppresses automatic package restarts so the user remains in control; and
 - creates a GUID-named workspace directly below `%TEMP%` and validates its exact shape before recursive cleanup.
 
-The console dashboard shows each download, verification, installation, restart, and cleanup state. Its full-screen selector uses vertically grouped descriptions, explicit text states, visible current settings, redraw-in-place feedback, and a highlighted primary action. Output is ASCII-safe and uses standard Windows console colors only as reinforcement, so the interface and copied troubleshooting logs remain understandable without color.
+The console dashboard shows each resolution, download, verification, installation, restart, and cleanup state. It adapts from a compact 78-column fallback up to a readable 110-column maximized layout. Centered fixed-width badges, neutral message text, consistent columns, plain-language results, and per-package progress make the current action easy to scan without turning the log into a wall of color. The full-screen selector uses vertically grouped descriptions, explicit text states, visible current settings, redraw-in-place feedback, and a highlighted primary action. Output is ASCII-safe and uses standard Windows console colors only as reinforcement, so the interface and copied troubleshooting logs remain understandable without color.
+
+After cleanup, an interactive run replaces the progress log with a concise final result screen. It states whether every selected package completed, whether a restart is required, whether temporary downloads were removed, and the first recorded failure when attention is needed. Press `R` to save a developer/IT technical report before exiting, or press any other key to close. The report defaults to a timestamped `.txt` file under `%USERPROFILE%`; the prompt accepts either another folder or a complete `.txt` path. Reports include run identity, source revision, system and architecture details, the requested and resolved package plan, trust controls, cleanup results, an event timeline, package exit codes, and failure guidance. User-profile and temp paths are normalized in report text, and credentials, environment dumps, and package contents are excluded.
 
 ## Requirements
 
@@ -163,7 +169,7 @@ This repository intentionally contains no Microsoft EXE, CAB, DLL, MSI, or archi
 
 ## Verification status
 
-Before publication, the installer was checked with a fixture/unit suite, an explicit no-archive regression, PowerShell parser validation, PSScriptAnalyzer 1.25.0 (including Windows PowerShell 5.1 syntax, command, and type compatibility rules), live commit-pinned GitHub source resolution, live Microsoft metadata resolution for x86, x64, and ARM64, and live checks of every configured endpoint. Native Windows UAC, Authenticode, and installer execution could not be exercised from the Linux development host; that limitation is reported in the release notes until a native-Windows smoke test is completed.
+Before publication, the installer was checked with a fixture/unit suite, an explicit no-archive regression, PowerShell parser validation, PSScriptAnalyzer 1.25.0 (including Windows PowerShell 5.1 syntax, command, and type compatibility rules), live commit-pinned GitHub source resolution, live Microsoft metadata resolution for x86, x64, and ARM64, and live checks of every configured endpoint. A fresh live audit also downloaded all 11 fixed legacy packages and confirmed every reviewed SHA-256. On 2026-08-29, both Microsoft v14 aliases served file version `14.51.36247.0`, which is the current reviewed downgrade floor. Native Windows UAC, Authenticode, and installer execution could not be exercised from the Linux development host; that limitation remains until a native-Windows smoke test is completed.
 
 ## Third-party software
 

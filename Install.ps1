@@ -26,6 +26,10 @@ All, or any combination of 2005, 2008, 2010, 2012, 2013, and v14.
 .PARAMETER KeepDownloads
 Retains the installer workspace, including downloaded metadata and packages.
 
+.PARAMETER ReportPath
+Writes a UTF-8 technical report to a .txt file or a timestamped file in the
+specified directory. Interactive runs can choose a path from the final screen.
+
 .PARAMETER ShowHelp
 Shows concise command-line help without elevation or network access.
 
@@ -51,6 +55,17 @@ param(
     [string[]]$VisualCppVersions = 'All',
 
     [switch]$KeepDownloads,
+
+    [AllowEmptyString()]
+    [string]$ReportPath = '',
+
+    [switch]$InteractiveSession,
+
+    [AllowEmptyString()]
+    [string]$DefaultReportDirectory = '',
+
+    [ValidatePattern('\A(?:[0-9a-f]{40})?\z')]
+    [string]$SourceRevision = '',
 
     [Alias('h', 'Help')]
     [switch]$ShowHelp,
@@ -103,6 +118,33 @@ function Get-PreferredPowerShellExecutable {
     return $windowsPowerShellPath
 }
 
+function ConvertTo-NativeQuotedArgument {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Value
+    )
+
+    if ($Value -match '[\x00-\x1f"]') {
+        throw 'A native process argument contains a control character or quotation mark.'
+    }
+
+    # Start-Process joins ArgumentList arrays into one native command line.
+    # In Windows' legacy argument parser, trailing backslashes must be doubled
+    # before the closing quote or the quote can be escaped into the value.
+    $trailingBackslashCount = 0
+    for ($index = $Value.Length - 1; $index -ge 0 -and $Value[$index] -eq '\'; $index--) {
+        $trailingBackslashCount++
+    }
+    $escapedValue = $Value
+    if ($trailingBackslashCount -gt 0) {
+        $escapedValue += '\' * $trailingBackslashCount
+    }
+    return '"' + $escapedValue + '"'
+}
+
 function Resolve-InstallerOptionSet {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -142,12 +184,16 @@ function Get-InstallerChildArgument {
         [Parameter(Mandatory = $true)][string]$ScriptPath,
         [psobject]$OptionSet,
         [switch]$IncludeSelection,
-        [bool]$RetainDownloads = $false
+        [bool]$RetainDownloads = $false,
+        [switch]$InteractiveSession,
+        [AllowEmptyString()][string]$DefaultReportDirectory = '',
+        [AllowEmptyString()][string]$RequestedReportPath = '',
+        [ValidatePattern('\A(?:[0-9a-f]{40})?\z')][string]$SourceRevision = ''
     )
 
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-        '-File', ('"{0}"' -f $ScriptPath)
+        '-File', (ConvertTo-NativeQuotedArgument -Value $ScriptPath)
     )
     if ($IncludeSelection) {
         if ($null -eq $OptionSet) { throw 'Resolved installer options are required for a child process.' }
@@ -158,6 +204,17 @@ function Get-InstallerChildArgument {
         )
     }
     if ($RetainDownloads) { $arguments += '-KeepDownloads' }
+    if ($InteractiveSession) { $arguments += '-InteractiveSession' }
+    foreach ($pathOption in @(
+        [pscustomobject]@{ Name = '-DefaultReportDirectory'; Value = $DefaultReportDirectory },
+        [pscustomobject]@{ Name = '-ReportPath'; Value = $RequestedReportPath }
+    )) {
+        if ([string]::IsNullOrWhiteSpace([string]$pathOption.Value)) { continue }
+        $arguments += @([string]$pathOption.Name, (ConvertTo-NativeQuotedArgument -Value ([string]$pathOption.Value)))
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SourceRevision)) {
+        $arguments += @('-SourceRevision', $SourceRevision)
+    }
     return $arguments
 }
 
@@ -201,13 +258,22 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw 'This installer supports Windows only. Help is available with -Help.'
 }
 
+if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+    try {
+        $ReportPath = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($ReportPath))
+    }
+    catch {
+        throw "Invalid technical report path: $($_.Exception.Message)"
+    }
+}
+
 $powershellExecutable = Get-PreferredPowerShellExecutable
 
 $preferredIsPowerShell7 = [IO.Path]::GetFileName($powershellExecutable) -ieq 'pwsh.exe'
 if ($preferredIsPowerShell7 -and $PSVersionTable.PSEdition -ne 'Core') {
     Write-Host 'PowerShell 7 detected. Continuing with pwsh.exe ...' -ForegroundColor Cyan
     try {
-        $childArguments = Get-InstallerChildArgument -ScriptPath $PSCommandPath -OptionSet $resolvedOptions -IncludeSelection:($selectionOptionsWereBound.Count -gt 0) -RetainDownloads ([bool]$KeepDownloads)
+        $childArguments = Get-InstallerChildArgument -ScriptPath $PSCommandPath -OptionSet $resolvedOptions -IncludeSelection:($selectionOptionsWereBound.Count -gt 0) -RetainDownloads ([bool]$KeepDownloads) -InteractiveSession:$InteractiveSession -DefaultReportDirectory $DefaultReportDirectory -RequestedReportPath $ReportPath -SourceRevision $SourceRevision
         $preferredProcess = Start-Process -FilePath $powershellExecutable -ArgumentList $childArguments -NoNewWindow -Wait -PassThru -ErrorAction Stop
         exit $preferredProcess.ExitCode
     }
@@ -225,6 +291,7 @@ if ($selectionOptionsWereBound.Count -eq 0) {
     try {
         $selection = Read-InstallerSelection -InitialKeepDownloads ([bool]$KeepDownloads)
         if ($selection.Cancelled) { exit 2 }
+        $InteractiveSession = $true
         $KeepDownloads = [bool]$selection.KeepDownloads
         $resolvedOptions = Resolve-InstallerOptionSet -ComponentText ([string]$selection.Components) -ExcludedComponentText '' -DotNetChannelText ([string]$selection.DotNetChannels) -VisualCppVersionText ([string]$selection.VisualCppVersions)
     }
@@ -238,7 +305,16 @@ $selectedComponents = @($resolvedOptions.Components)
 $normalizedDotNetChannels = @($resolvedOptions.DotNetChannels)
 $normalizedVisualCppVersions = [string]$resolvedOptions.VisualCppVersions
 $normalizedDotNetChannelText = $normalizedDotNetChannels -join ','
-$childArguments = Get-InstallerChildArgument -ScriptPath $PSCommandPath -OptionSet $resolvedOptions -IncludeSelection -RetainDownloads ([bool]$KeepDownloads)
+if ($InteractiveSession -and [string]::IsNullOrWhiteSpace($DefaultReportDirectory)) {
+    $DefaultReportDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ([string]::IsNullOrWhiteSpace($DefaultReportDirectory)) {
+        $DefaultReportDirectory = $env:USERPROFILE
+    }
+    if ([string]::IsNullOrWhiteSpace($DefaultReportDirectory)) {
+        throw 'The user profile directory could not be resolved for the technical report.'
+    }
+}
+$childArguments = Get-InstallerChildArgument -ScriptPath $PSCommandPath -OptionSet $resolvedOptions -IncludeSelection -RetainDownloads ([bool]$KeepDownloads) -InteractiveSession:$InteractiveSession -DefaultReportDirectory $DefaultReportDirectory -RequestedReportPath $ReportPath -SourceRevision $SourceRevision
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -259,19 +335,29 @@ if (-not $isAdministrator) {
 $workspacePath = $null
 $restartRequired = $false
 $completedPackageCount = 0
+$plannedPackageCount = 0
 $cleanupSucceeded = $true
+$cleanupStatus = 'No temporary workspace was created.'
 $retainedWorkspacePath = ''
 $failureMessage = ''
 $outcome = 'Failed'
 $finalExitCode = 1
+$architecture = 'Unknown'
+$curlVersion = 'Unavailable'
+$resolvedPackageLines = @()
+$fixedHashPackageCount = 0
+$rollingVisualCppSelected = $false
+$runId = [guid]::NewGuid().ToString()
+$startedAt = [datetimeoffset]::Now
 $overallTimer = [Diagnostics.Stopwatch]::StartNew()
+Initialize-InstallerDiagnostic -RunId $runId
 
 try {
     $architecture = Get-TargetArchitecture
     $workspacePath = New-InstallerWorkspace
 
     Write-InstallerBanner
-    Write-InstallerStatus -State Info -Message 'Building the selected install plan ...'
+    Write-InstallerStatus -State Info -Message 'Preparing the install plan: resolving current releases and official Microsoft sources'
 
     $curlVersion = Get-CurlVersion
 
@@ -282,9 +368,51 @@ try {
     }
     $visualCppPackages = @()
     if ($selectedComponents -contains 'VisualCpp') {
-        $visualCppPackages = @(Get-VisualCppPackage -Configuration $configuration -OperatingSystemArchitecture $architecture -VersionSelection $normalizedVisualCppVersions)
+        $unresolvedVisualCppPackages = @(Get-VisualCppPackage -Configuration $configuration -OperatingSystemArchitecture $architecture -VersionSelection $normalizedVisualCppVersions)
+        $visualCppPackages = @(Resolve-MicrosoftPackageSourceSet -Packages $unresolvedVisualCppPackages -WorkspacePath $workspacePath)
     }
-    Write-InstallerSystemSummary -Architecture $architecture -PowerShellVersion $PSVersionTable.PSVersion.ToString() -PowerShellEdition $PSVersionTable.PSEdition -CurlVersion $curlVersion -WorkspacePath $workspacePath -DotNetPackageCount $dotNetPackages.Count -VisualCppPackageCount $visualCppPackages.Count -DirectXSelected ($selectedComponents -contains 'DirectX')
+    $directXPackage = $null
+    if ($selectedComponents -contains 'DirectX') {
+        $unresolvedDirectXPackage = Get-DirectXPackage -Configuration $configuration
+        $directXPackage = @(Resolve-MicrosoftPackageSourceSet -Packages @($unresolvedDirectXPackage) -WorkspacePath $workspacePath)[0]
+    }
+    $plannedPackageCount = $dotNetPackages.Count + $visualCppPackages.Count
+    if ($null -ne $directXPackage) { $plannedPackageCount++ }
+
+    $packageNumber = 0
+    foreach ($package in $dotNetPackages) {
+        $packageNumber++
+        $resolvedPackageLines += ('{0:00} | .NET SDK | {1} | Version {2} | Architecture {3} | Verification SHA-512' -f $packageNumber, $package.Name, $package.Version, $package.Architecture)
+    }
+    foreach ($package in $visualCppPackages) {
+        $packageNumber++
+        $versionResolution = if ([string]$package.Version -eq 'v14') {
+            'Latest supported permalink; file version validated after download'
+        }
+        elseif ([string]::IsNullOrWhiteSpace([string]$package.DocumentedVersion)) {
+            'Final Microsoft release; file version recorded after download'
+        }
+        else {
+            'Final documented version {0}' -f $package.DocumentedVersion
+        }
+        $verification = if ([string]$package.Version -eq 'v14') {
+            'Microsoft signature + file-version security floor'
+        }
+        else {
+            'Reviewed SHA-256 + Microsoft signature'
+        }
+        $resolvedPackageLines += ('{0:00} | Visual C++ | {1} | {2} | Architecture {3} | Source resolved at run time | Verification {4}' -f $packageNumber, $package.Name, $versionResolution, $package.Architecture, $verification)
+    }
+    if ($null -ne $directXPackage) {
+        $packageNumber++
+        $resolvedPackageLines += ('{0:00} | DirectX | {1} | Final June 2010 release | Architecture neutral | Source resolved at run time | Verification reviewed SHA-256 + Microsoft signature' -f $packageNumber, $directXPackage.Name)
+    }
+    $fixedHashPackageCount = @($visualCppPackages | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Sha256) }).Count
+    if ($null -ne $directXPackage -and -not [string]::IsNullOrWhiteSpace([string]$directXPackage.Sha256)) {
+        $fixedHashPackageCount++
+    }
+    $rollingVisualCppSelected = @($visualCppPackages | Where-Object { [string]$_.VersionPolicy -eq 'Rolling' }).Count -gt 0
+    Write-InstallerSystemSummary -Architecture $architecture -PowerShellVersion $PSVersionTable.PSVersion.ToString() -PowerShellEdition $PSVersionTable.PSEdition -CurlVersion $curlVersion -DotNetPackageCount $dotNetPackages.Count -VisualCppPackageCount $visualCppPackages.Count -DirectXSelected ($selectedComponents -contains 'DirectX') -FixedHashPackageCount $fixedHashPackageCount -RollingVisualCppSelected $rollingVisualCppSelected
 
     $phaseNumber = 0
     $phaseTotal = $selectedComponents.Count
@@ -296,12 +424,12 @@ try {
     if ($selectedComponents -contains 'VisualCpp') {
         $phaseNumber++
         Write-InstallerSection -Number $phaseNumber -Total $phaseTotal -Title 'Microsoft Visual C++ Redistributables'
-        Invoke-VisualCppInstallation -Configuration $configuration -OperatingSystemArchitecture $architecture -WorkspacePath $workspacePath -VersionSelection $normalizedVisualCppVersions -CompletedPackageCount ([ref]$completedPackageCount) -RestartRequired ([ref]$restartRequired)
+        Invoke-VisualCppInstallation -Packages $visualCppPackages -WorkspacePath $workspacePath -CompletedPackageCount ([ref]$completedPackageCount) -RestartRequired ([ref]$restartRequired)
     }
     if ($selectedComponents -contains 'DirectX') {
         $phaseNumber++
         Write-InstallerSection -Number $phaseNumber -Total $phaseTotal -Title 'DirectX June 2010 Legacy Runtimes'
-        Invoke-DirectXInstallation -Configuration $configuration -WorkspacePath $workspacePath -CompletedPackageCount ([ref]$completedPackageCount) -RestartRequired ([ref]$restartRequired)
+        Invoke-DirectXInstallation -Package $directXPackage -WorkspacePath $workspacePath -CompletedPackageCount ([ref]$completedPackageCount) -RestartRequired ([ref]$restartRequired)
     }
 
     if ($restartRequired) {
@@ -322,6 +450,7 @@ finally {
     if (-not [string]::IsNullOrWhiteSpace($workspacePath)) {
         if ($KeepDownloads) {
             $retainedWorkspacePath = $workspacePath
+            $cleanupStatus = "Retained at $workspacePath"
             if ($outcome -eq 'Failed') {
                 Write-InstallerStatus -State Retained -Message "Keeping the installer workspace for diagnosis at: $workspacePath"
             }
@@ -333,11 +462,13 @@ finally {
             Write-InstallerStatus -State Cleanup -Message 'Removing the protected temporary workspace ...'
             try {
                 Remove-InstallerWorkspace -WorkspacePath $workspacePath
+                $cleanupStatus = 'Removed successfully'
                 Write-InstallerStatus -State Ok -Message 'Temporary workspace removed.'
             }
             catch {
                 $cleanupSucceeded = $false
                 $cleanupMessage = $_.Exception.Message
+                $cleanupStatus = "Cleanup failed: $cleanupMessage"
                 Write-InstallerStatus -State Failed -Message "Temporary workspace cleanup failed: $cleanupMessage"
                 if ([string]::IsNullOrWhiteSpace($failureMessage)) {
                     $failureMessage = $cleanupMessage
@@ -354,4 +485,102 @@ finally {
 
 $overallTimer.Stop()
 Write-InstallerSummary -Outcome $outcome -CompletedPackageCount $completedPackageCount -Duration $overallTimer.Elapsed -CleanupSucceeded $cleanupSucceeded -RetainedWorkspacePath $retainedWorkspacePath -Message $failureMessage
+$completedAt = [datetimeoffset]::Now
+$powerShellDisplay = '{0} ({1})' -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition
+$operatingSystem = [Environment]::OSVersion.VersionString
+try {
+    $operatingSystemRecord = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    $operatingSystem = '{0} | Version {1} | Build {2}' -f $operatingSystemRecord.Caption, $operatingSystemRecord.Version, $operatingSystemRecord.BuildNumber
+}
+catch {
+    $null = $_
+}
+
+$reportDefaultDirectory = $DefaultReportDirectory
+if ([string]::IsNullOrWhiteSpace($reportDefaultDirectory)) {
+    $reportDefaultDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+}
+if ([string]::IsNullOrWhiteSpace($reportDefaultDirectory)) {
+    $reportDefaultDirectory = $env:USERPROFILE
+}
+
+$securityControls = @(
+    'HTTPS-only downloads with redirect limits, retries, timeouts, and approved effective-host validation',
+    'Run-time source resolution from first-party Microsoft catalogs and dedicated Microsoft aliases with separate discovery and payload host allowlists',
+    'Exact-one family, architecture, and filename matching before the selected package plan may execute',
+    'Commit-pinned individual GitHub source files with PowerShell syntax validation',
+    'Sequential unattended package execution with automatic restarts suppressed'
+)
+if ($selectedComponents -contains 'DotNet') {
+    $securityControls += 'Supported-channel metadata plus latest.version corroboration and Microsoft-published SHA-512 verification for .NET SDK installers'
+}
+if ($fixedHashPackageCount -gt 0) {
+    $securityControls += 'Reviewed SHA-256 verification for fixed Visual C++ and DirectX packages before Microsoft digital-signature verification'
+}
+if ($selectedComponents -contains 'VisualCpp' -or $selectedComponents -contains 'DirectX') {
+    $securityControls += 'Microsoft Corporation digital-signature verification for Visual C++ and DirectX executables'
+}
+if ($rollingVisualCppSelected) {
+    $securityControls += 'Microsoft latest-supported v14 aliases plus Microsoft signature and reviewed minimum-version enforcement'
+}
+
+$reportContext = @{
+    RunId                 = $runId
+    SourceRevision        = if ([string]::IsNullOrWhiteSpace($SourceRevision)) { 'Local source; Git revision unavailable' } else { $SourceRevision }
+    StartedAt             = $startedAt
+    CompletedAt           = $completedAt
+    Outcome               = $outcome
+    ExitCode              = $finalExitCode
+    CompletedPackageCount = $completedPackageCount
+    PlannedPackageCount   = $plannedPackageCount
+    Duration               = $overallTimer.Elapsed
+    RestartRequired       = $restartRequired
+    CleanupStatus         = $cleanupStatus
+    DownloadsRetained     = -not [string]::IsNullOrWhiteSpace($retainedWorkspacePath)
+    RetainedWorkspacePath = $retainedWorkspacePath
+    FailureMessage        = $failureMessage
+    ComputerName          = [Environment]::MachineName
+    OperatingSystem       = $operatingSystem
+    Architecture          = $architecture
+    PowerShell            = $powerShellDisplay
+    CurlVersion           = $curlVersion
+    Culture               = [Globalization.CultureInfo]::CurrentCulture.Name
+    Components            = $selectedComponents -join ','
+    DotNetChannels        = $normalizedDotNetChannelText
+    VisualCppVersions     = $normalizedVisualCppVersions
+    ResolvedPackages      = $resolvedPackageLines
+    SecurityControls      = $securityControls
+    UserProfilePath       = $reportDefaultDirectory
+    TempPath              = [IO.Path]::GetTempPath()
+}
+$diagnosticEvents = @(Get-InstallerDiagnosticEvent)
+$reportExporter = {
+    param($DestinationPath)
+    Export-InstallerTechnicalReport -DestinationPath ([string]$DestinationPath) -DefaultDirectory $reportDefaultDirectory -Context $reportContext -Events $diagnosticEvents -Timestamp $completedAt.LocalDateTime
+}
+
+$technicalReportPath = ''
+$technicalReportError = ''
+if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+    try {
+        $technicalReportPath = [string](& $reportExporter $ReportPath)
+        Write-InstallerStatus -State Ok -Message "Technical report saved: $technicalReportPath"
+    }
+    catch {
+        $technicalReportError = $_.Exception.Message
+        Write-InstallerStatus -State Failed -Message "Technical report export failed: $technicalReportError"
+        if (-not $InteractiveSession) {
+            $finalExitCode = 1
+        }
+    }
+}
+
+if ($InteractiveSession) {
+    if ([string]::IsNullOrWhiteSpace($reportDefaultDirectory)) {
+        Write-InstallerStatus -State Failed -Message 'The user profile directory is unavailable; a technical report cannot be saved.'
+        $technicalReportError = 'The user profile directory is unavailable.'
+        $reportDefaultDirectory = [IO.Path]::GetTempPath()
+    }
+    $null = Invoke-InstallerCompletionPrompt -Outcome $outcome -CompletedPackageCount $completedPackageCount -PlannedPackageCount $plannedPackageCount -Duration $overallTimer.Elapsed -CleanupSucceeded $cleanupSucceeded -RestartRequired $restartRequired -DownloadsRetained (-not [string]::IsNullOrWhiteSpace($retainedWorkspacePath)) -RetainedWorkspacePath $retainedWorkspacePath -Message $failureMessage -DefaultReportDirectory $reportDefaultDirectory -ReportExporter $reportExporter -ExistingReportPath $technicalReportPath -InitialReportError $technicalReportError
+}
 exit $finalExitCode
