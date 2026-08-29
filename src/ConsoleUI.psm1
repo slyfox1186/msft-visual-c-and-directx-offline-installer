@@ -191,6 +191,9 @@ function Write-InstallerHelp {
     Write-Host '  * Separate multiple values with commas. Values are case-insensitive.'
     Write-Host '  * Architecture is automatic and cannot be overridden.'
     Write-Host '  * Explicit .NET channels must still be supported by Microsoft.'
+    Write-Host '  * .NET resolves the latest stable SDK in each selected supported channel.'
+    Write-Host '  * Visual C++ v14 tracks Microsoft''s latest supported release.'
+    Write-Host '  * Legacy Visual C++ and DirectX packages are final fixed releases.'
     Write-Host '  * Microsoft progress windows may appear; they require no clicks.'
     Write-Host '  * Packages never restart Windows automatically.'
     Write-Host '  * Downloads are removed by default, including after failures.'
@@ -228,22 +231,49 @@ function Write-InstallerSelectionMenu {
     $visualCppState = if ($SelectedComponents.VisualCpp) { 'X' } else { ' ' }
     $directXState = if ($SelectedComponents.DirectX) { 'X' } else { ' ' }
     $keepState = if ($KeepDownloads) { 'X' } else { ' ' }
-    $dotNetDetail = if ($SelectedComponents.DotNet) { $DotNetChannels } else { 'disabled' }
-    $visualCppDetail = if ($SelectedComponents.VisualCpp) { $VisualCppVersions } else { 'disabled' }
+    $dotNetAction = if ($SelectedComponents.DotNet) { '>' } else { '-' }
+    $visualCppAction = if ($SelectedComponents.VisualCpp) { '>' } else { '-' }
+    $dotNetDetail = if (-not $SelectedComponents.DotNet) {
+        'Enable [1] first'
+    }
+    elseif ($DotNetChannels.Trim() -ieq 'All') {
+        'All supported (latest stable)'
+    }
+    else {
+        $DotNetChannels
+    }
+    $visualCppDetail = if (-not $SelectedComponents.VisualCpp) {
+        'Enable [2] first'
+    }
+    elseif ($VisualCppVersions.Trim() -ieq 'All') {
+        'All release families'
+    }
+    else {
+        $VisualCppVersions
+    }
 
     Write-Host ''
     Write-Host ('-' * $script:ConsoleWidth) -ForegroundColor DarkGray
-    Write-Host '  PACKAGE SELECTION' -ForegroundColor Cyan
+    Write-Host '  PACKAGE GROUPS' -ForegroundColor Cyan
     Write-Host ('-' * $script:ConsoleWidth) -ForegroundColor DarkGray
-    Write-Host ("  [1] [{0}] .NET SDKs" -f $dotNetState)
-    Write-Host ("  [2] [{0}] Visual C++ Runtimes" -f $visualCppState)
-    Write-Host ("  [3] [{0}] DirectX Legacy Runtimes   June 2010" -f $directXState)
-    Write-Host ("  [4]     .NET channels               {0}" -f $dotNetDetail)
-    Write-Host ("  [5]     Visual C++ versions         {0}" -f $visualCppDetail)
+    Write-Host ("  [1] [{0}] {1,-30}{2}" -f $dotNetState, '.NET SDKs', 'Latest stable per supported channel')
+    Write-Host ("  [2] [{0}] {1,-30}{2}" -f $visualCppState, 'Visual C++ Runtimes', 'Latest supported v14 + final legacy')
+    Write-Host ("  [3] [{0}] {1,-30}{2}" -f $directXState, 'DirectX Legacy Runtimes', 'Final June 2010 release')
+    Write-Host ''
+    Write-Host '  VERSION FILTERS (OPTIONAL)' -ForegroundColor Cyan
+    Write-Host ("  [4] [{0}] {1,-35}{2}" -f $dotNetAction, 'Choose .NET SDK channels', $dotNetDetail)
+    Write-Host ("  [5] [{0}] {1,-35}{2}" -f $visualCppAction, 'Choose Visual C++ release families', $visualCppDetail)
+    Write-Host ''
+    Write-Host '  RELEASE RESOLUTION' -ForegroundColor Cyan
+    Write-Host '  Dynamic: .NET -> latest stable per selected supported channel'
+    Write-Host '           VC++ v14 -> latest supported Microsoft release'
+    Write-Host '  Fixed:   final legacy VC++ (2005-2013) and DirectX June 2010 releases.'
+    Write-Host ''
+    Write-Host '  OTHER OPTIONS' -ForegroundColor Cyan
     Write-Host ("  [K] [{0}] Keep downloaded files" -f $keepState)
     Write-Host ''
-    Write-Host '  1-3 toggle | 4-5 customize | A selects all | K keeps downloads'
-    Write-Host '  Press ENTER when ready to install, or Q to cancel.'
+    Write-Host '  1-3 toggle groups | 4-5 choose versions | K keeps downloads'
+    Write-Host '  A selects all packages | ENTER installs | Q cancels'
 }
 
 function Test-InstallerMenuSelection {
@@ -286,7 +316,7 @@ function Read-InstallerSelection {
     $keepDownloads = $InitialKeepDownloads
 
     Write-InstallerBanner
-    Write-InstallerStatus -State Info -Message 'Choose packages, then press ENTER when ready.'
+    Write-InstallerStatus -State Info -Message 'Choose package groups and optional versions, then press ENTER.'
 
     while ($true) {
         Write-InstallerSelectionMenu -SelectedComponents $selectedComponents -DotNetChannels $dotNetChannels -VisualCppVersions $visualCppVersions -KeepDownloads $keepDownloads
@@ -320,17 +350,17 @@ function Read-InstallerSelection {
             '3' { $selectedComponents.DirectX = -not $selectedComponents.DirectX; continue }
             '4' {
                 if (-not $selectedComponents.DotNet) {
-                    Write-InstallerStatus -State Info -Message 'Enable .NET SDKs before choosing channels.'
+                    Write-InstallerStatus -State Info -Message 'Enable .NET SDKs before choosing SDK channels.'
                     continue
                 }
-                $rawChannels = & $InputProvider '.NET channels (All or 8.0,10.0)'
+                $rawChannels = & $InputProvider '.NET SDK channels (All or example: 8.0,10.0)'
                 if ($null -eq $rawChannels) {
-                    throw 'Interactive input ended while choosing .NET channels.'
+                    throw 'Interactive input ended while choosing .NET SDK channels.'
                 }
                 $candidate = ([string]$rawChannels).Trim() -replace '[ \t]', ''
                 $channelPattern = '(?i)\A(?:All|\d+\.\d+)(?:,(?:\d+\.\d+))*\z'
                 if (-not (Test-InstallerMenuSelection -Value $candidate -Pattern $channelPattern)) {
-                    Write-InstallerStatus -State Failed -Message 'Use All or comma-separated channels such as 8.0,10.0.'
+                    Write-InstallerStatus -State Failed -Message 'Use All or comma-separated SDK channels such as 8.0,10.0.'
                     continue
                 }
                 $dotNetChannels = $candidate
@@ -338,17 +368,17 @@ function Read-InstallerSelection {
             }
             '5' {
                 if (-not $selectedComponents.VisualCpp) {
-                    Write-InstallerStatus -State Info -Message 'Enable Visual C++ before choosing versions.'
+                    Write-InstallerStatus -State Info -Message 'Enable Visual C++ before choosing release families.'
                     continue
                 }
-                $rawVersions = & $InputProvider 'VC++ versions (All or 2005,...,v14)'
+                $rawVersions = & $InputProvider 'Visual C++ release families (All or example: 2013,v14)'
                 if ($null -eq $rawVersions) {
-                    throw 'Interactive input ended while choosing Visual C++ versions.'
+                    throw 'Interactive input ended while choosing Visual C++ release families.'
                 }
                 $candidate = ([string]$rawVersions).Trim() -replace '[ \t]', ''
                 $versionPattern = '(?i)\A(?:All|2005|2008|2010|2012|2013|v14)(?:,(?:2005|2008|2010|2012|2013|v14))*\z'
                 if (-not (Test-InstallerMenuSelection -Value $candidate -Pattern $versionPattern)) {
-                    Write-InstallerStatus -State Failed -Message 'Use All or versions from 2005, 2008, 2010, 2012, 2013, and v14.'
+                    Write-InstallerStatus -State Failed -Message 'Use All or release families from 2005, 2008, 2010, 2012, 2013, and v14.'
                     continue
                 }
                 $visualCppVersions = $candidate

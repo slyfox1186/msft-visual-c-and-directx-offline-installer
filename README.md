@@ -2,7 +2,7 @@
 
 A secure, architecture-aware Windows installer for supported Microsoft .NET SDKs, Microsoft Visual C++ redistributables, and the legacy DirectX End-User Runtimes (June 2010).
 
-The project downloads packages directly from Microsoft at runtime. It does not store or redistribute Microsoft installers, and it does not require the maintainer to update hard-coded .NET version numbers whenever Microsoft publishes a stable SDK servicing release.
+The project downloads packages directly from Microsoft at runtime. For rolling packages, it resolves the latest stable SDK version for every selected, currently supported .NET channel and the latest supported Visual C++ v14 release when the installation runs. Visual C++ 2005-2013 and DirectX June 2010 are final fixed legacy releases. The repository stores no Microsoft installers and does not pin rolling package versions that would become stale.
 
 > The repository name is retained for continuity with the original offline project. This GitHub version is online-only. The separate Google Drive offline package remains available through the [original Reddit post](https://www.reddit.com/r/Batch/comments/1mwbttn/comment/p6iy6km/).
 
@@ -11,12 +11,14 @@ The project downloads packages directly from Microsoft at runtime. It does not s
 Open **Command Prompt** (`cmd.exe`) and paste this one-line command:
 
 ```bat
-curl.exe -fsSL "https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1" | powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "& ([ScriptBlock]::Create([Console]::In.ReadToEnd()))"
+start "Microsoft Runtime Installer" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$msriSource=@(& curl.exe -fsS 'https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1');if($LASTEXITCODE -ne 0 -or $msriSource.Count -eq 0){exit 1};try{$msriScript=[ScriptBlock]::Create($msriSource -join [Environment]::NewLine)}catch{exit 1};& $msriScript" && exit
 ```
 
-The launcher opens a dedicated PowerShell window with a package-selection menu and every component initially enabled. Toggle packages or customize versions, then press **Enter** when ready. Windows requests administrator approval only after the selection is complete. Downloads, verification, and installation then run automatically. Supported Microsoft progress windows remain visible, but they require no clicks or other input. The scripts suppress automatic restarts and report when a manual restart is needed.
+Command Prompt starts one independent PowerShell window and then closes immediately. The PowerShell window owns the complete run: it displays a package-selection menu with every component initially enabled, downloads and validates the supporting source, waits for installation, removes temporary source files, and closes when finished. Toggle package groups or choose version filters, then press **Enter** when ready. Windows requests administrator approval only after the selection is complete. Downloads, verification, and installation then run automatically. Supported Microsoft progress windows remain visible, but they require no clicks or other input. The scripts suppress automatic restarts and report when a manual restart is needed.
 
-The command streams `Start.ps1` directly into the Windows PowerShell version included with Windows, so it does not create a bootstrap script in `%TEMP%`. The small command wrapper reads the complete response before parsing and invoking it as one script; this avoids the statement-at-a-time behavior of `-Command -` with multi-line advanced scripts. The launcher then prefers `pwsh.exe` from `PATH` when PowerShell 7 is installed and otherwise uses Windows PowerShell 5.1.
+The command does not create a bootstrap script in `%TEMP%`. The independent PowerShell process uses `curl.exe` to collect the complete `Start.ps1` response, rejects curl failures and empty responses, then parses the source as one script before invoking it. A malformed response fails closed with exit code `1` and cannot execute partially. This avoids the statement-at-a-time behavior of `-Command -` with multi-line advanced scripts. The launcher prefers `pwsh.exe` from `PATH` when PowerShell 7 is installed and otherwise continues with Windows PowerShell 5.1. Its validated child stays in the same keyboard-connected PowerShell window.
+
+If the original Command Prompt was not already elevated, Windows may open an elevated PowerShell window after the selector when UAC approval is required. Starting from an Administrator Command Prompt keeps the complete run in the independent PowerShell window opened by the command.
 
 No repository ZIP is downloaded or extracted. The launcher resolves `main` to one validated Git commit, then uses `curl.exe` to download `Install.ps1`, both PowerShell modules, and the package configuration individually from that immutable revision. It validates each GitHub URL, downloaded file, and PowerShell syntax before execution, then removes those temporary source files when the installer exits.
 
@@ -87,7 +89,13 @@ x64 Windows receives both Visual C++ architectures because 64-bit Windows can ru
 - Microsoft Visual C++ 2005 SP1, 2008 SP1, 2010 SP1, 2012 Update 4, 2013, and the latest supported v14 redistributable selected for the operating-system architecture.
 - DirectX End-User Runtimes (June 2010), which supplies legacy side-by-side components used by older games and applications. It does not replace the version of DirectX built into Windows.
 
-The v14 permanent Microsoft links update to Microsoft's latest supported Visual C++ v14 runtime. Older Visual C++ families and DirectX June 2010 are final legacy packages and therefore use fixed official Microsoft endpoints.
+## How versions stay current
+
+- **.NET SDKs are dynamic.** Every run downloads Microsoft's current release index, keeps only supported LTS or STS channels in active or maintenance support, rejects preview version strings, and selects each channel's published `latest-sdk` installer for the detected Windows architecture.
+- **Visual C++ v14 is dynamic.** Microsoft's permanent v14 links resolve to its latest supported x86 and x64 redistributables at download time.
+- **Legacy packages are fixed by design.** Visual C++ 2005-2013 and DirectX June 2010 are Microsoft's final fixed legacy releases, so there is no newer rolling stable version to discover. The installer retrieves those final packages from their official Microsoft endpoints.
+
+The terminal identifies these policies before installation and prints the concrete .NET SDK version in every resolved package name. This distinction prevents “latest” from being used misleadingly for legacy products that no longer have rolling releases.
 
 ## Security and reliability controls
 

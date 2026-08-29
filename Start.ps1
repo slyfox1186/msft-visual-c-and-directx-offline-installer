@@ -5,11 +5,11 @@
 Downloads and runs the current Microsoft Runtime Installer source from GitHub.
 
 .DESCRIPTION
-Designed for curl-to-PowerShell streaming, this launcher resolves one GitHub
-commit, downloads each required source file individually over HTTPS into a
-protected temporary workspace, opens the interactive selector when no package
-options were supplied, propagates the installer exit code, and removes source
-files.
+Designed for the detached curl launcher and compatible with legacy streaming,
+this script resolves one GitHub commit, downloads each required source file
+individually over HTTPS into a protected temporary workspace, opens the
+interactive selector when no package options were supplied, propagates the
+installer exit code, and removes source files.
 #>
 
 [CmdletBinding()]
@@ -77,7 +77,9 @@ $requiredSourceFiles = @(
     'config/packages.psd1'
 )
 $launcherLeafPattern = '\Amsft-runtime-launcher-[a-f0-9]{32}\z'
-$launcherWasStreamed = [string]::IsNullOrWhiteSpace($PSCommandPath)
+# Dynamic source has no PSCommandPath in both detached and streamed launches,
+# so the actual input handle determines whether a child can read the keyboard.
+$launcherInputIsRedirected = [Console]::IsInputRedirected
 $downloadedLauncherPath = Join-Path ([IO.Path]::GetTempPath()) 'msri.ps1'
 $shouldDeleteSelf = -not [string]::IsNullOrWhiteSpace($PSCommandPath) -and
     [string]::Equals([IO.Path]::GetFullPath($PSCommandPath), [IO.Path]::GetFullPath($downloadedLauncherPath), [StringComparison]::OrdinalIgnoreCase)
@@ -141,6 +143,9 @@ function Write-LauncherHelp {
     Write-Host ''
     Write-Host 'With no selection options, an interactive package menu opens.'
     Write-Host 'Explicit package options bypass the menu for automation.'
+    Write-Host '.NET resolves the latest stable SDK in each selected supported channel.'
+    Write-Host 'Visual C++ v14 tracks Microsoft''s latest supported release.'
+    Write-Host 'Legacy Visual C++ and DirectX packages are final fixed releases.'
     Write-Host 'Launcher support files are fetched individually and are always temporary.'
     Write-Host 'KeepDownloads applies only to Microsoft metadata and installer packages.'
     Write-Host 'PowerShell 7 is preferred when pwsh.exe is in PATH; 5.1 is the fallback.'
@@ -477,7 +482,7 @@ try {
         PassThru     = $true
         ErrorAction  = 'Stop'
     }
-    if ($selectionOptionsWereBound.Count -gt 0 -or -not $launcherWasStreamed) {
+    if ($selectionOptionsWereBound.Count -gt 0 -or -not $launcherInputIsRedirected) {
         $startParameters.NoNewWindow = $true
     }
     $childProcess = Start-Process @startParameters
