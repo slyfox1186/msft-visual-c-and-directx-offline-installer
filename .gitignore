@@ -1,0 +1,63 @@
+# Microsoft redistributable payloads are downloaded at runtime and are never
+# stored in Git history or attached to this repository's releases.
+*.exe
+*.msi
+*.msix
+*.msu
+*.msp
+*.cab
+*.dll
+
+# Generated release archives and staging directories.
+/dist/
+/release-staging/
+*.zip
+*.7z
+*.tar
+*.tar.gz
+
+# Incomplete downloads and temporary files.
+*.crdownload
+*.download
+*.part
+*.tmp
+*.temp
+*.bak
+*.log
+~$*
+
+# Local credentials and environment overrides.
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
+
+# Editor and IDE metadata.
+.idea/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*~
+*.swp
+*.swo
+
+# Operating-system metadata.
+.DS_Store
+.AppleDouble
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Local Git worktrees.
+/.worktrees/
+/worktrees/
+
+# Local Codex handoff instructions requested by the maintainer.
+/AGENTS.md
+
+# Local copy/paste draft for the maintainer's Reddit post.
+/REDDIT-POST-UPDATE.md
