@@ -11,12 +11,12 @@ The project downloads packages directly from Microsoft at runtime. It does not s
 Open **Command Prompt** (`cmd.exe`) and paste this one-line command:
 
 ```bat
-curl.exe -fsSL "https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1" | powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command -
+curl.exe -fsSL "https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1" | powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "& ([ScriptBlock]::Create([Console]::In.ReadToEnd()))"
 ```
 
 The launcher opens a dedicated PowerShell window with a package-selection menu and every component initially enabled. Toggle packages or customize versions, then press **Enter** when ready. Windows requests administrator approval only after the selection is complete. Downloads, verification, and installation then run automatically. Supported Microsoft progress windows remain visible, but they require no clicks or other input. The scripts suppress automatic restarts and report when a manual restart is needed.
 
-The command streams `Start.ps1` directly into the Windows PowerShell version included with Windows, so it does not create a bootstrap script in `%TEMP%`. The streamed launcher defers execution until its complete function body has arrived, prefers `pwsh.exe` from `PATH` when PowerShell 7 is installed, and otherwise uses Windows PowerShell 5.1.
+The command streams `Start.ps1` directly into the Windows PowerShell version included with Windows, so it does not create a bootstrap script in `%TEMP%`. The small command wrapper reads the complete response before parsing and invoking it as one script; this avoids the statement-at-a-time behavior of `-Command -` with multi-line advanced scripts. The launcher then prefers `pwsh.exe` from `PATH` when PowerShell 7 is installed and otherwise uses Windows PowerShell 5.1.
 
 No repository ZIP is downloaded or extracted. The launcher resolves `main` to one validated Git commit, then uses `curl.exe` to download `Install.ps1`, both PowerShell modules, and the package configuration individually from that immutable revision. It validates each GitHub URL, downloaded file, and PowerShell syntax before execution, then removes those temporary source files when the installer exits.
 
