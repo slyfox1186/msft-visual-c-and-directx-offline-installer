@@ -5,10 +5,11 @@
 Downloads and runs the current Microsoft Runtime Installer source from GitHub.
 
 .DESCRIPTION
-Designed for curl-to-PowerShell streaming, this launcher downloads one coherent
-source archive, validates its GitHub HTTPS origin, extracts it into a protected
-temporary workspace, opens the interactive selector when no package options
-were supplied, propagates the installer exit code, and removes source files.
+Designed for curl-to-PowerShell streaming, this launcher resolves one GitHub
+commit, downloads each required source file individually over HTTPS into a
+protected temporary workspace, opens the interactive selector when no package
+options were supplied, propagates the installer exit code, and removes source
+files.
 #>
 
 [CmdletBinding()]
@@ -61,8 +62,20 @@ $selectionOptionsWereBound = @(
         Where-Object { $OriginalBoundParameters.ContainsKey($_) }
 )
 
-$repositoryArchiveUri = 'https://github.com/slyfox1186/msft-visual-c-and-directx-offline-installer/archive/refs/heads/main.zip'
-$githubHostPattern = '\A(?:github\.com|codeload\.github\.com)\z'
+$repositoryOwner = 'slyfox1186'
+$repositoryName = 'msft-visual-c-and-directx-offline-installer'
+$repositoryRefName = 'refs/heads/main'
+$repositoryRefUri = 'https://api.github.com/repos/slyfox1186/msft-visual-c-and-directx-offline-installer/git/ref/heads/main'
+$githubApiHost = 'api.github.com'
+$githubApiVersion = '2026-03-10'
+$githubRawHost = 'raw.githubusercontent.com'
+$commitShaPattern = '\A[0-9a-f]{40}\z'
+$requiredSourceFiles = @(
+    'Install.ps1',
+    'src/ConsoleUI.psm1',
+    'src/RuntimeInstaller.psm1',
+    'config/packages.psd1'
+)
 $launcherLeafPattern = '\Amsft-runtime-launcher-[a-f0-9]{32}\z'
 $launcherWasStreamed = [string]::IsNullOrWhiteSpace($PSCommandPath)
 $downloadedLauncherPath = Join-Path ([IO.Path]::GetTempPath()) 'msri.ps1'
@@ -84,7 +97,30 @@ function Write-LauncherStatus {
     if ($State -eq 'FAILED') { $color = [ConsoleColor]::Red }
     if ($State -eq 'CLEANUP') { $color = [ConsoleColor]::DarkCyan }
     $timestamp = [datetime]::Now.ToString('HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
-    Write-Host ('[{0}] [{1,-8}] {2}' -f $timestamp, $State, $Message) -ForegroundColor $color
+    $prefix = '[{0}] [{1,-8}] ' -f $timestamp, $State
+    $continuationPrefix = ' ' * $prefix.Length
+    $currentPrefix = $prefix
+    $remainingMessage = $Message.Trim()
+    if ($remainingMessage.Length -eq 0) {
+        Write-Host $prefix -ForegroundColor $color
+        return
+    }
+
+    while ($remainingMessage.Length -gt 0) {
+        $availableWidth = 78 - $currentPrefix.Length
+        if ($remainingMessage.Length -le $availableWidth) {
+            $lineText = $remainingMessage
+            $remainingMessage = ''
+        }
+        else {
+            $breakPosition = $remainingMessage.LastIndexOf(' ', $availableWidth)
+            if ($breakPosition -le 0) { $breakPosition = $availableWidth }
+            $lineText = $remainingMessage.Substring(0, $breakPosition).TrimEnd()
+            $remainingMessage = $remainingMessage.Substring($breakPosition).TrimStart()
+        }
+        Write-Host ($currentPrefix + $lineText) -ForegroundColor $color
+        $currentPrefix = $continuationPrefix
+    }
 }
 
 function Write-LauncherHelp {
@@ -105,13 +141,19 @@ function Write-LauncherHelp {
     Write-Host ''
     Write-Host 'With no selection options, an interactive package menu opens.'
     Write-Host 'Explicit package options bypass the menu for automation.'
-    Write-Host 'The launcher source archive is always temporary. KeepDownloads applies only'
-    Write-Host 'to the installer workspace, including downloaded metadata and packages.'
+    Write-Host 'Launcher support files are fetched individually and are always temporary.'
+    Write-Host 'KeepDownloads applies only to Microsoft metadata and installer packages.'
     Write-Host 'PowerShell 7 is preferred when pwsh.exe is in PATH; 5.1 is the fallback.'
 }
 
 function Test-AllowedGitHubUri {
-    param([Parameter(Mandatory = $true)][string]$Uri)
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('api.github.com', 'raw.githubusercontent.com')]
+        [string]$ExpectedHost,
+        [Parameter(Mandatory = $true)][string]$ExpectedAbsolutePath
+    )
 
     try {
         $parsedUri = [uri]$Uri
@@ -119,7 +161,10 @@ function Test-AllowedGitHubUri {
             $parsedUri.Scheme -ceq 'https' -and
             $parsedUri.Port -eq 443 -and
             [string]::IsNullOrEmpty($parsedUri.UserInfo) -and
-            $parsedUri.DnsSafeHost -match $githubHostPattern
+            [string]::Equals($parsedUri.DnsSafeHost, $ExpectedHost, [StringComparison]::OrdinalIgnoreCase) -and
+            $parsedUri.AbsolutePath -ceq $ExpectedAbsolutePath -and
+            [string]::IsNullOrEmpty($parsedUri.Query) -and
+            [string]::IsNullOrEmpty($parsedUri.Fragment)
     }
     catch {
         return $false
@@ -137,6 +182,132 @@ function Test-SafeLauncherWorkspace {
     }
     catch {
         return $false
+    }
+}
+
+function Invoke-GitHubSourceDownload {
+    [CmdletBinding()]
+    [OutputType([IO.FileInfo])]
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [Parameter(Mandatory = $true)][string]$WorkspacePath,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('api.github.com', 'raw.githubusercontent.com')]
+        [string]$ExpectedHost,
+        [Parameter(Mandatory = $true)][string]$DisplayName
+    )
+
+    $parsedUri = [uri]$Uri
+    if (-not (Test-AllowedGitHubUri -Uri $Uri -ExpectedHost $ExpectedHost -ExpectedAbsolutePath $parsedUri.AbsolutePath)) {
+        throw "Rejected GitHub source URL: $Uri"
+    }
+
+    $fullWorkspacePath = [IO.Path]::GetFullPath($WorkspacePath).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $fullDestinationPath = [IO.Path]::GetFullPath($DestinationPath)
+    $comparison = [StringComparison]::OrdinalIgnoreCase
+    $workspacePrefix = $fullWorkspacePath + [IO.Path]::DirectorySeparatorChar
+    if (-not $fullDestinationPath.StartsWith($workspacePrefix, $comparison)) {
+        throw "Refusing a GitHub download outside the launcher workspace: $fullDestinationPath"
+    }
+    $destinationDirectory = Split-Path -Parent $fullDestinationPath
+    if (-not (Test-Path -LiteralPath $destinationDirectory -PathType Container)) {
+        throw "GitHub download directory does not exist: $destinationDirectory"
+    }
+    if (Test-Path -LiteralPath $fullDestinationPath) {
+        throw "Refusing to overwrite an existing GitHub source file: $fullDestinationPath"
+    }
+
+    $curlCommand = Get-Command -Name 'curl.exe' -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+    $curlArguments = @(
+        '--fail', '--location', '--max-redirs', '10',
+        '--proto', '=https', '--proto-redir', '=https', '--tlsv1.2',
+        '--retry', '4', '--retry-delay', '2', '--retry-connrefused',
+        '--connect-timeout', '30', '--max-time', '120', '--silent',
+        '--show-error', '--output', $fullDestinationPath,
+        '--write-out', '%{url_effective}', '--url', $parsedUri.AbsoluteUri
+    )
+    if ($ExpectedHost -ceq $githubApiHost) {
+        $curlArguments = @(
+            '--header', 'Accept: application/vnd.github+json',
+            '--header', "X-GitHub-Api-Version: $githubApiVersion"
+        ) + $curlArguments
+    }
+
+    Write-LauncherStatus -State DOWNLOAD -Message "$DisplayName ..."
+    try {
+        $effectiveUriText = (& $curlCommand.Source @curlArguments | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            throw "curl.exe failed with exit code $LASTEXITCODE while downloading $DisplayName."
+        }
+        if (-not (Test-AllowedGitHubUri -Uri $effectiveUriText -ExpectedHost $ExpectedHost -ExpectedAbsolutePath $parsedUri.AbsolutePath)) {
+            throw "Rejected effective GitHub URL for ${DisplayName}: $effectiveUriText"
+        }
+
+        $downloadedFile = Get-Item -LiteralPath $fullDestinationPath -Force -ErrorAction Stop
+        if ($downloadedFile.PSIsContainer -or $downloadedFile.Length -le 0) {
+            throw "GitHub did not return a nonempty regular file for $DisplayName."
+        }
+        Write-LauncherStatus -State OK -Message ("{0} downloaded ({1:N0} bytes)." -f $DisplayName, $downloadedFile.Length)
+        return $downloadedFile
+    }
+    catch {
+        Remove-Item -LiteralPath $fullDestinationPath -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
+function Get-GitHubCommitSha {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)][string]$WorkspacePath
+    )
+
+    $revisionPath = Join-Path ([IO.Path]::GetFullPath($WorkspacePath)) 'github-ref.json'
+    $null = Invoke-GitHubSourceDownload -Uri $repositoryRefUri -DestinationPath $revisionPath -WorkspacePath $WorkspacePath -ExpectedHost $githubApiHost -DisplayName 'Resolving the current GitHub revision'
+    $revision = Get-Content -LiteralPath $revisionPath -Raw -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $refProperty = $revision.PSObject.Properties['ref']
+    if ($null -eq $refProperty -or [string]$refProperty.Value -cne $repositoryRefName) {
+        throw "GitHub revision metadata returned an unexpected ref; expected $repositoryRefName."
+    }
+    $objectProperty = $revision.PSObject.Properties['object']
+    if ($null -eq $objectProperty -or $null -eq $objectProperty.Value) {
+        throw 'GitHub revision metadata is missing the object property.'
+    }
+    $typeProperty = $objectProperty.Value.PSObject.Properties['type']
+    if ($null -eq $typeProperty -or [string]$typeProperty.Value -cne 'commit') {
+        throw 'GitHub revision metadata returned an unexpected object type; expected commit.'
+    }
+    $shaProperty = $objectProperty.Value.PSObject.Properties['sha']
+    if ($null -eq $shaProperty) {
+        throw 'GitHub revision metadata is missing object.sha.'
+    }
+    $commitSha = [string]$shaProperty.Value
+    if ($commitSha -notmatch $commitShaPattern) {
+        throw "GitHub returned an invalid commit SHA: $commitSha"
+    }
+    return $commitSha
+}
+
+function Assert-PowerShellSourceSyntax {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath
+    )
+
+    $tokens = $null
+    $parseErrors = $null
+    [void][Management.Automation.Language.Parser]::ParseFile(
+        [IO.Path]::GetFullPath($LiteralPath),
+        [ref]$tokens,
+        [ref]$parseErrors
+    )
+    $errors = @($parseErrors)
+    if ($errors.Count -gt 0) {
+        throw "Downloaded PowerShell source failed syntax validation: $LiteralPath ($($errors[0].Message))"
     }
 }
 
@@ -251,61 +422,39 @@ try {
         throw "Generated an unsafe launcher workspace: $workspacePath"
     }
     $null = New-Item -Path $workspacePath -ItemType Directory -ErrorAction Stop
-    $archivePath = Join-Path $workspacePath 'source.zip'
-    $extractionPath = Join-Path $workspacePath 'source'
+    $sourceRoot = Join-Path $workspacePath 'source'
+    $null = New-Item -Path $sourceRoot -ItemType Directory -ErrorAction Stop
 
-    if (-not (Test-AllowedGitHubUri -Uri $repositoryArchiveUri)) {
-        throw "Rejected launcher source URL: $repositoryArchiveUri"
-    }
-    $curlCommand = Get-Command -Name 'curl.exe' -CommandType Application -ErrorAction Stop | Select-Object -First 1
-    $curlArguments = @(
-        '--fail', '--location', '--max-redirs', '10',
-        '--proto', '=https', '--proto-redir', '=https', '--tlsv1.2',
-        '--retry', '4', '--retry-delay', '2', '--retry-connrefused',
-        '--connect-timeout', '30', '--max-time', '600', '--progress-bar',
-        '--show-error', '--output', $archivePath,
-        '--write-out', '%{url_effective}', '--url', $repositoryArchiveUri
-    )
+    $commitSha = Get-GitHubCommitSha -WorkspacePath $workspacePath
+    Write-LauncherStatus -State OK -Message ("Pinned source revision: {0}" -f $commitSha.Substring(0, 12))
 
-    Write-LauncherStatus -State DOWNLOAD -Message 'Downloading the current source archive from GitHub ...'
-    $effectiveUriText = (& $curlCommand.Source @curlArguments | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0) {
-        throw "curl.exe failed with exit code $LASTEXITCODE."
-    }
-    if (-not (Test-AllowedGitHubUri -Uri $effectiveUriText)) {
-        throw "Rejected effective GitHub URL: $effectiveUriText"
-    }
-
-    $archive = Get-Item -LiteralPath $archivePath -ErrorAction Stop
-    if ($archive.Length -le 4) { throw 'GitHub source archive is empty.' }
-    $stream = [IO.File]::OpenRead($archivePath)
-    try {
-        if ($stream.ReadByte() -ne 0x50 -or $stream.ReadByte() -ne 0x4B) {
-            throw 'GitHub source archive does not have a ZIP signature.'
+    $downloadedSourcePaths = @{}
+    foreach ($relativePath in $requiredSourceFiles) {
+        $localRelativePath = $relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar)
+        $destinationPath = Join-Path $sourceRoot $localRelativePath
+        $destinationDirectory = Split-Path -Parent $destinationPath
+        if (-not (Test-Path -LiteralPath $destinationDirectory -PathType Container)) {
+            $null = New-Item -Path $destinationDirectory -ItemType Directory -Force -ErrorAction Stop
         }
-    }
-    finally {
-        $stream.Dispose()
-    }
-    Write-LauncherStatus -State OK -Message ("Source archive downloaded ({0:N2} MB)." -f ($archive.Length / 1MB))
 
-    Expand-Archive -LiteralPath $archivePath -DestinationPath $extractionPath -Force -ErrorAction Stop
-    $installScripts = @(Get-ChildItem -LiteralPath $extractionPath -Filter 'Install.ps1' -File -Recurse -ErrorAction Stop)
-    if ($installScripts.Count -ne 1) {
-        throw "Expected one Install.ps1 in the source archive; found $($installScripts.Count)."
+        $rawUri = 'https://raw.githubusercontent.com/{0}/{1}/{2}/{3}' -f $repositoryOwner, $repositoryName, $commitSha, $relativePath
+        $downloadedFile = Invoke-GitHubSourceDownload -Uri $rawUri -DestinationPath $destinationPath -WorkspacePath $workspacePath -ExpectedHost $githubRawHost -DisplayName $relativePath
+        Assert-PowerShellSourceSyntax -LiteralPath $downloadedFile.FullName
+        $downloadedSourcePaths[$relativePath] = $downloadedFile.FullName
     }
-    $sourceRoot = $installScripts[0].Directory.FullName
-    foreach ($requiredPath in @('src\ConsoleUI.psm1', 'src\RuntimeInstaller.psm1', 'config\packages.psd1')) {
-        if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot $requiredPath) -PathType Leaf)) {
-            throw "Source archive is missing $requiredPath."
-        }
+    if ($downloadedSourcePaths.Count -ne $requiredSourceFiles.Count) {
+        throw "Expected $($requiredSourceFiles.Count) source files; downloaded $($downloadedSourcePaths.Count)."
     }
-    Write-LauncherStatus -State OK -Message 'Source archive structure validated.'
+    $installScriptPath = [string]$downloadedSourcePaths['Install.ps1']
+    if ([string]::IsNullOrWhiteSpace($installScriptPath)) {
+        throw 'The commit-pinned source set did not contain Install.ps1.'
+    }
+    Write-LauncherStatus -State OK -Message 'Individual source files passed syntax validation.'
 
     $powershellExecutable = Get-PreferredPowerShellExecutable
     $childArguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-        '-File', ('"{0}"' -f $installScripts[0].FullName)
+        '-File', ('"{0}"' -f $installScriptPath)
     )
     if ($selectionOptionsWereBound.Count -gt 0) {
         $childArguments += @(

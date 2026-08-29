@@ -16,7 +16,9 @@ curl.exe -fsSL "https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-d
 
 The launcher opens a dedicated PowerShell window with a package-selection menu and every component initially enabled. Toggle packages or customize versions, then press **Enter** when ready. Windows requests administrator approval only after the selection is complete. Downloads, verification, and installation then run automatically. Supported Microsoft progress windows remain visible, but they require no clicks or other input. The scripts suppress automatic restarts and report when a manual restart is needed.
 
-The command streams `Start.ps1` directly into the Windows PowerShell version included with Windows, so it does not create a bootstrap script in `%TEMP%`. The streamed launcher defers execution until its complete function body has arrived, prefers `pwsh.exe` from `PATH` when PowerShell 7 is installed, and otherwise uses Windows PowerShell 5.1. It obtains one coherent source archive from this repository and removes that temporary source workspace after the installer exits.
+The command streams `Start.ps1` directly into the Windows PowerShell version included with Windows, so it does not create a bootstrap script in `%TEMP%`. The streamed launcher defers execution until its complete function body has arrived, prefers `pwsh.exe` from `PATH` when PowerShell 7 is installed, and otherwise uses Windows PowerShell 5.1.
+
+No repository ZIP is downloaded or extracted. The launcher resolves `main` to one validated Git commit, then uses `curl.exe` to download `Install.ps1`, both PowerShell modules, and the package configuration individually from that immutable revision. It validates each GitHub URL, downloaded file, and PowerShell syntax before execution, then removes those temporary source files when the installer exits.
 
 Review [Start.ps1](Start.ps1) and [Install.ps1](Install.ps1) before running them if you prefer to audit remote scripts first. [Bootstrap.ps1](Bootstrap.ps1) remains only as a compatibility entry point for the original published command.
 
@@ -92,6 +94,7 @@ The v14 permanent Microsoft links update to Microsoft's latest supported Visual 
 The installer:
 
 - invokes the real `curl.exe`, not PowerShell's historical `curl` alias;
+- resolves one GitHub commit, validates its 40-character SHA, and downloads the fixed source manifest as individual raw files rather than an archive;
 - requires HTTPS, limits redirects, uses timeouts and retries, and rejects non-approved effective hosts;
 - parses Microsoft's .NET JSON as structured data and accepts only stable version, architecture, filename, URL, and SHA-512 formats;
 - compares each .NET SDK file against Microsoft's published SHA-512 digest;
@@ -148,7 +151,7 @@ This repository intentionally contains no Microsoft EXE, CAB, DLL, MSI, or archi
 
 ## Verification status
 
-Before publication, the installer was checked with a fixture/unit suite, PowerShell parser validation, PSScriptAnalyzer 1.25.0 (including Windows PowerShell 5.1 syntax, command, and type compatibility rules), live Microsoft metadata resolution for x86, x64, and ARM64, and live checks of every configured endpoint. Native Windows UAC, Authenticode, and installer execution could not be exercised from the Linux development host; that limitation is reported in the release notes until a native-Windows smoke test is completed.
+Before publication, the installer was checked with a fixture/unit suite, an explicit no-archive regression, PowerShell parser validation, PSScriptAnalyzer 1.25.0 (including Windows PowerShell 5.1 syntax, command, and type compatibility rules), live commit-pinned GitHub source resolution, live Microsoft metadata resolution for x86, x64, and ARM64, and live checks of every configured endpoint. Native Windows UAC, Authenticode, and installer execution could not be exercised from the Linux development host; that limitation is reported in the release notes until a native-Windows smoke test is completed.
 
 ## Third-party software
 

@@ -16,4 +16,4 @@ This independent project is not affiliated with, sponsored by, or endorsed by Mi
 
 ## GitHub distribution infrastructure
 
-The curl launcher retrieves this project's own source archive through GitHub. GitHub's service terms and privacy statement apply to that transfer. Microsoft package payloads are fetched from Microsoft endpoints, not from GitHub.
+The curl launcher resolves one repository commit and retrieves this project's required source files individually through GitHub's API and raw-content service. It does not download a GitHub source archive. GitHub's service terms and privacy statement apply to those transfers. Microsoft package payloads are fetched from Microsoft endpoints, not from GitHub.
