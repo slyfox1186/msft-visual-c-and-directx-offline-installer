@@ -11,14 +11,14 @@ The project downloads packages directly from Microsoft at runtime. For rolling p
 Open **Command Prompt** (`cmd.exe`) and paste this one-line command:
 
 ```bat
-start "Microsoft Runtime Installer" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$msriSource=@(& curl.exe -fsS 'https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1');if($LASTEXITCODE -ne 0 -or $msriSource.Count -eq 0){exit 1};try{$msriScript=[ScriptBlock]::Create($msriSource -join [Environment]::NewLine)}catch{exit 1};& $msriScript" && exit
+start "Microsoft Runtime Installer" /max powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$msriSource=@(& curl.exe -fsS 'https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1');if($LASTEXITCODE -ne 0 -or $msriSource.Count -eq 0){exit 1};try{$msriScript=[ScriptBlock]::Create($msriSource -join [Environment]::NewLine)}catch{exit 1};& $msriScript" && exit
 ```
 
-Command Prompt starts one independent PowerShell window and then closes immediately. The PowerShell window owns the complete run: it displays a compact install plan with every component initially enabled, downloads and validates the supporting source, waits for installation, removes temporary source files, and closes when finished. Explicit `ON`/`OFF` states distinguish package toggles from version choices, and the primary **Enter** action is highlighted. Toggle packages or choose version filters, then press **Enter** when ready. Windows requests administrator approval only after the selection is complete. Downloads, verification, and installation then run automatically. Supported Microsoft progress windows remain visible, but they require no clicks or other input. The scripts suppress automatic restarts and report when a manual restart is needed.
+Command Prompt starts one independent, maximized PowerShell window and then closes immediately. The PowerShell window owns the complete run: it displays the interactive selector with every component initially enabled, downloads and validates the supporting source, waits for installation, removes temporary source files, and closes when finished. After successful source validation, the selector clears the bootstrap progress from the display; bootstrap errors remain visible if validation fails. Toggle packages or change optional settings, then press **Enter** when ready. Windows requests administrator approval only after the selection is complete. Downloads, verification, and installation then run automatically. Supported Microsoft progress windows remain visible, but they require no clicks or other input. The scripts suppress automatic restarts and report when a manual restart is needed.
 
 The command does not create a bootstrap script in `%TEMP%`. The independent PowerShell process uses `curl.exe` to collect the complete `Start.ps1` response, rejects curl failures and empty responses, then parses the source as one script before invoking it. A malformed response fails closed with exit code `1` and cannot execute partially. This avoids the statement-at-a-time behavior of `-Command -` with multi-line advanced scripts. The launcher prefers `pwsh.exe` from `PATH` when PowerShell 7 is installed and otherwise continues with Windows PowerShell 5.1. Its validated child stays in the same keyboard-connected PowerShell window.
 
-If the original Command Prompt was not already elevated, Windows may open an elevated PowerShell window after the selector when UAC approval is required. Starting from an Administrator Command Prompt keeps the complete run in the independent PowerShell window opened by the command.
+If the original Command Prompt was not already elevated, Windows opens another maximized PowerShell window after the selector when UAC approval is required. Starting from an Administrator Command Prompt keeps the complete run in the independent maximized window opened by the command.
 
 No repository ZIP is downloaded or extracted. The launcher resolves `main` to one validated Git commit, then uses `curl.exe` to download `Install.ps1`, both PowerShell modules, and the package configuration individually from that immutable revision. It validates each GitHub URL, downloaded file, and PowerShell syntax before execution, then removes those temporary source files when the installer exits.
 
@@ -26,7 +26,9 @@ Review [Start.ps1](Start.ps1) and [Install.ps1](Install.ps1) before running them
 
 ## Interactive package selection
 
-The selector presents one aligned install plan and one customization section. Text labels communicate every state without relying on color: package rows show `ON` or `OFF`, filter rows show their current values, unavailable filters identify the package that must be enabled, and the download-retention row shows `Yes` or `No`. The menu also states that current .NET SDK and Visual C++ v14 versions are resolved from Microsoft when the run begins.
+The selector uses one full-screen view with each package description directly below its action. Text labels communicate every state without relying on color: package rows show `ON` or `OFF`, settings are written as actions, every setting has a `Current selection` line, and unavailable filters identify the package that must be enabled. Package descriptions distinguish dynamically resolved stable releases from final fixed legacy releases.
+
+Successful bootstrap progress is cleared immediately before the first selector render. Every choice then clears and redraws that same screen, preserving a short confirmation or error message without stacking duplicate menus. Pressing **Enter** clears the selector before UAC or installation output begins. Download and validation failures are not cleared.
 
 The default menu provides these controls:
 
@@ -38,7 +40,7 @@ The default menu provides these controls:
 - **Enter** starts the confirmed plan; and
 - `Q` cancels before elevation or downloads.
 
-At least one package group must remain selected. The menu is shown once, before UAC. Installation is unattended after confirmation.
+At least one package group must remain selected. Only one current selector is visible before UAC, and installation is unattended after confirmation.
 
 ## Advanced noninteractive use
 
@@ -114,7 +116,7 @@ The installer:
 - suppresses automatic package restarts so the user remains in control; and
 - creates a GUID-named workspace directly below `%TEMP%` and validates its exact shape before recursive cleanup.
 
-The console dashboard shows each download, verification, installation, restart, and cleanup state. Its compact selector uses aligned rows, explicit text states, and a highlighted primary action. Output is ASCII-safe and uses standard Windows console colors only as reinforcement, so the interface and copied troubleshooting logs remain understandable without color.
+The console dashboard shows each download, verification, installation, restart, and cleanup state. Its full-screen selector uses vertically grouped descriptions, explicit text states, visible current settings, redraw-in-place feedback, and a highlighted primary action. Output is ASCII-safe and uses standard Windows console colors only as reinforcement, so the interface and copied troubleshooting logs remain understandable without color.
 
 ## Requirements
 

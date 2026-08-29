@@ -485,6 +485,9 @@ try {
     if ($selectionOptionsWereBound.Count -gt 0 -or -not $launcherInputIsRedirected) {
         $startParameters.NoNewWindow = $true
     }
+    else {
+        $startParameters.WindowStyle = 'Maximized'
+    }
     $childProcess = Start-Process @startParameters
     if ($childProcess.ExitCode -notin @(0, 1, 2, 3010)) {
         throw "Installer returned unexpected exit code $($childProcess.ExitCode)."

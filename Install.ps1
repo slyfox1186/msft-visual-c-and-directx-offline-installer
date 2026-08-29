@@ -247,7 +247,7 @@ $isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::
 if (-not $isAdministrator) {
     Write-Host 'Administrator access is required. Requesting approval through Windows UAC ...' -ForegroundColor Yellow
     try {
-        $elevatedProcess = Start-Process -FilePath $powershellExecutable -ArgumentList $childArguments -Verb RunAs -Wait -PassThru -ErrorAction Stop
+        $elevatedProcess = Start-Process -FilePath $powershellExecutable -ArgumentList $childArguments -Verb RunAs -WindowStyle Maximized -Wait -PassThru -ErrorAction Stop
         exit $elevatedProcess.ExitCode
     }
     catch {

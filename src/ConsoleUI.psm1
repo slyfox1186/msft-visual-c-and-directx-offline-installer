@@ -156,13 +156,18 @@ function Write-InstallerBanner {
     param()
 
     $topRule = '+' + ('-' * ($script:ConsoleWidth - 2)) + '+'
+    $contentWidth = $script:ConsoleWidth - 4
     $title = 'MICROSOFT RUNTIME INSTALLER'
-    $subtitle = 'Secure downloads | Architecture-aware | Automatic cleanup'
+    $subtitle = 'SECURE DOWNLOADS | VERIFIED FILES | AUTO CLEANUP'
+    $titleLeftPadding = [math]::Floor(($contentWidth - $title.Length) / 2)
+    $subtitleLeftPadding = [math]::Floor(($contentWidth - $subtitle.Length) / 2)
+    $centeredTitle = ((' ' * $titleLeftPadding) + $title).PadRight($contentWidth)
+    $centeredSubtitle = ((' ' * $subtitleLeftPadding) + $subtitle).PadRight($contentWidth)
 
     Write-Host ''
     Write-Host $topRule -ForegroundColor Cyan
-    Write-Host ('| ' + $title.PadRight($script:ConsoleWidth - 4) + ' |') -ForegroundColor Cyan
-    Write-Host ('| ' + $subtitle.PadRight($script:ConsoleWidth - 4) + ' |') -ForegroundColor DarkCyan
+    Write-Host ('| ' + $centeredTitle + ' |') -ForegroundColor Cyan
+    Write-Host ('| ' + $centeredSubtitle + ' |') -ForegroundColor Cyan
     Write-Host $topRule -ForegroundColor Cyan
 }
 
@@ -211,15 +216,28 @@ function Write-InstallerHelp {
     Write-Host '  3010  Completed successfully; restart Windows to finish'
 }
 
-function Write-InstallerSelectionRow {
+function Write-InstallerMenuKey {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [string]$Key,
+        [string]$Key
+    )
 
-        [ValidateSet('', 'ON', 'OFF')]
-        [string]$State = '',
+    Write-Host '[' -NoNewline
+    Write-Host $Key -ForegroundColor Cyan -NoNewline
+    Write-Host ']' -NoNewline
+}
+
+function Write-InstallerPackageChoice {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 3)]
+        [int]$Key,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$Enabled,
 
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
@@ -227,27 +245,45 @@ function Write-InstallerSelectionRow {
 
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [string]$Detail,
-
-        [ConsoleColor]$DetailColor = [ConsoleColor]::Gray
+        [string]$Detail
     )
 
-    Write-Host '  [' -NoNewline
-    Write-Host $Key -ForegroundColor Cyan -NoNewline
-    Write-Host ']  ' -NoNewline
-
-    if ([string]::IsNullOrEmpty($State)) {
-        Write-Host (' ' * 5) -NoNewline
-    }
-    else {
-        $stateColor = if ($State -eq 'ON') { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow }
-        Write-Host ('[{0,-3}]' -f $State) -ForegroundColor $stateColor -NoNewline
-    }
+    $stateText = if ($Enabled) { '[ ON ]' } else { '[OFF ]' }
+    $stateColor = if ($Enabled) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow }
 
     Write-Host '  ' -NoNewline
-    Write-Host $Label.PadRight(20) -NoNewline
+    Write-InstallerMenuKey -Key $Key
     Write-Host '  ' -NoNewline
-    Write-Host $Detail -ForegroundColor $DetailColor
+    Write-Host $stateText -ForegroundColor $stateColor -NoNewline
+    Write-Host '  ' -NoNewline
+    Write-Host $Label
+    Write-Host (' ' * 15) -NoNewline
+    Write-Host $Detail -ForegroundColor Gray
+}
+
+function Write-InstallerSettingChoice {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Key,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Label,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Value,
+
+        [ConsoleColor]$ValueColor = [ConsoleColor]::Cyan
+    )
+
+    Write-Host '  ' -NoNewline
+    Write-InstallerMenuKey -Key $Key
+    Write-Host '  ' -NoNewline
+    Write-Host $Label
+    Write-InstallerWrappedLine -Prefix '       Current selection: ' -Text $Value -Color $ValueColor
 }
 
 function Write-InstallerSelectionMenu {
@@ -263,32 +299,18 @@ function Write-InstallerSelectionMenu {
         [string]$VisualCppVersions,
 
         [Parameter(Mandatory = $true)]
-        [bool]$KeepDownloads
+        [bool]$KeepDownloads,
+
+        [AllowEmptyString()]
+        [string]$FeedbackMessage = '',
+
+        [ValidateSet('Info', 'Updated', 'Failed')]
+        [string]$FeedbackState = 'Info'
     )
 
-    $dotNetState = if ($SelectedComponents.DotNet) { 'ON' } else { 'OFF' }
-    $visualCppState = if ($SelectedComponents.VisualCpp) { 'ON' } else { 'OFF' }
-    $directXState = if ($SelectedComponents.DirectX) { 'ON' } else { 'OFF' }
-    $dotNetPackageDetail = if ($SelectedComponents.DotNet) {
-        'Latest stable in each selected channel'
-    }
-    else {
-        'Not selected'
-    }
-    $visualCppPackageDetail = if ($SelectedComponents.VisualCpp) {
-        'Latest v14 plus final legacy releases'
-    }
-    else {
-        'Not selected'
-    }
-    $directXPackageDetail = if ($SelectedComponents.DirectX) {
-        'Final June 2010 legacy runtime'
-    }
-    else {
-        'Not selected'
-    }
+    $selectedCount = @($SelectedComponents.Values | Where-Object { $_ }).Count
     $dotNetDetail = if (-not $SelectedComponents.DotNet) {
-        'Unavailable (enable 1)'
+        'Unavailable - turn on package 1'
     }
     elseif ($DotNetChannels.Trim() -ieq 'All') {
         'All supported channels'
@@ -297,7 +319,7 @@ function Write-InstallerSelectionMenu {
         $DotNetChannels
     }
     $visualCppDetail = if (-not $SelectedComponents.VisualCpp) {
-        'Unavailable (enable 2)'
+        'Unavailable - turn on package 2'
     }
     elseif ($VisualCppVersions.Trim() -ieq 'All') {
         'All release families'
@@ -307,28 +329,72 @@ function Write-InstallerSelectionMenu {
     }
     $dotNetDetailColor = if ($SelectedComponents.DotNet) { [ConsoleColor]::Cyan } else { [ConsoleColor]::Yellow }
     $visualCppDetailColor = if ($SelectedComponents.VisualCpp) { [ConsoleColor]::Cyan } else { [ConsoleColor]::Yellow }
-    $keepDetail = if ($KeepDownloads) { 'Yes' } else { 'No' }
+    $keepDetail = if ($KeepDownloads) {
+        'Yes - retain files after installation'
+    }
+    else {
+        'No - remove files after installation'
+    }
     $keepDetailColor = if ($KeepDownloads) { [ConsoleColor]::Yellow } else { [ConsoleColor]::Green }
+    $countColor = if ($selectedCount -gt 0) { [ConsoleColor]::Green } else { [ConsoleColor]::Red }
+    $headingText = '  SELECT PACKAGES'
+    $countText = '{0} OF 3 SELECTED' -f $selectedCount
+    $headingGap = $script:ConsoleWidth - $headingText.Length - $countText.Length
 
     Write-Host ''
-    Write-Host '  INSTALL PLAN' -ForegroundColor Cyan
+    Write-Host $headingText -ForegroundColor Cyan -NoNewline
+    Write-Host (' ' * $headingGap) -NoNewline
+    Write-Host $countText -ForegroundColor $countColor
+    Write-Host '  Press 1, 2, or 3 to turn a package group on or off.' -ForegroundColor Gray
     Write-Host ''
-    Write-InstallerSelectionRow -Key 1 -State $dotNetState -Label '.NET SDKs' -Detail $dotNetPackageDetail
-    Write-InstallerSelectionRow -Key 2 -State $visualCppState -Label 'Visual C++' -Detail $visualCppPackageDetail
-    Write-InstallerSelectionRow -Key 3 -State $directXState -Label 'DirectX' -Detail $directXPackageDetail
+    Write-InstallerPackageChoice -Key 1 -Enabled ([bool]$SelectedComponents.DotNet) -Label '.NET SDKs' -Detail 'Latest stable SDK in every selected supported channel'
     Write-Host ''
-    Write-Host '  CUSTOMIZE' -ForegroundColor Cyan
+    Write-InstallerPackageChoice -Key 2 -Enabled ([bool]$SelectedComponents.VisualCpp) -Label 'Visual C++ Redistributables' -Detail 'Latest v14 plus final legacy releases (2005-2013)'
     Write-Host ''
-    Write-InstallerSelectionRow -Key 4 -Label '.NET channels' -Detail $dotNetDetail -DetailColor $dotNetDetailColor
-    Write-InstallerSelectionRow -Key 5 -Label 'Visual C++ families' -Detail $visualCppDetail -DetailColor $visualCppDetailColor
-    Write-InstallerSelectionRow -Key K -Label 'Keep downloads' -Detail $keepDetail -DetailColor $keepDetailColor
+    Write-InstallerPackageChoice -Key 3 -Enabled ([bool]$SelectedComponents.DirectX) -Label 'DirectX Legacy Runtime' -Detail 'Final Microsoft June 2010 release'
     Write-Host ''
-    Write-Host '  Latest .NET and VC++ v14 versions resolve from Microsoft at run time.' -ForegroundColor Gray
+    Write-Host ''
+    Write-Host '  OPTIONAL SETTINGS' -ForegroundColor Cyan
+    Write-Host '  Press 4, 5, or K to change a setting.' -ForegroundColor Gray
+    Write-Host ''
+    Write-InstallerSettingChoice -Key 4 -Label 'Choose .NET SDK channels' -Value $dotNetDetail -ValueColor $dotNetDetailColor
+    Write-Host ''
+    Write-InstallerSettingChoice -Key 5 -Label 'Choose Visual C++ release families' -Value $visualCppDetail -ValueColor $visualCppDetailColor
+    Write-Host ''
+    Write-InstallerSettingChoice -Key K -Label 'Keep downloaded installers' -Value $keepDetail -ValueColor $keepDetailColor
     Write-Host ''
     Write-Host '  ' -NoNewline
-    Write-Host 'ENTER' -ForegroundColor Green -NoNewline
-    Write-Host '  Install selected packages'
-    Write-Host '  1-3 Toggle | 4-5 Choose versions | A Select all | K Keep | Q Cancel' -ForegroundColor Gray
+    Write-InstallerMenuKey -Key A
+    Write-Host '  Restore all default selections'
+    Write-Host ''
+    Write-Host ('  ' + ('-' * ($script:ConsoleWidth - 4))) -ForegroundColor Cyan
+    $leftAction = '  [ ENTER ]  INSTALL SELECTED PACKAGES'
+    $rightAction = '[ Q ]  CANCEL'
+    $actionGap = $script:ConsoleWidth - $leftAction.Length - $rightAction.Length
+    Write-Host '  [' -NoNewline
+    Write-Host ' ENTER ' -ForegroundColor Green -NoNewline
+    Write-Host ']  INSTALL SELECTED PACKAGES' -NoNewline
+    Write-Host (' ' * $actionGap) -NoNewline
+    Write-Host '[' -NoNewline
+    Write-Host ' Q ' -ForegroundColor Yellow -NoNewline
+    Write-Host ']  CANCEL'
+    Write-Host ('  ' + ('-' * ($script:ConsoleWidth - 4))) -ForegroundColor Cyan
+
+    if (-not [string]::IsNullOrWhiteSpace($FeedbackMessage)) {
+        Write-Host ''
+        $feedbackLabel = 'INFO'
+        $feedbackColor = [ConsoleColor]::Cyan
+        if ($FeedbackState -eq 'Updated') {
+            $feedbackLabel = 'UPDATED'
+            $feedbackColor = [ConsoleColor]::Green
+        }
+        elseif ($FeedbackState -eq 'Failed') {
+            $feedbackLabel = 'ERROR'
+            $feedbackColor = [ConsoleColor]::Red
+        }
+        Write-InstallerWrappedLine -Prefix ('  {0}: ' -f $feedbackLabel) -Text $FeedbackMessage -Color $feedbackColor
+    }
+    Write-Host ''
 }
 
 function Test-InstallerMenuSelection {
@@ -352,11 +418,30 @@ function Test-InstallerMenuSelection {
     return $true
 }
 
+function Clear-InstallerScreen {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScreenClearer
+    )
+
+    try {
+        $null = & $ScreenClearer
+    }
+    catch {
+        # Clearing is cosmetic. A host without screen-clearing support must not
+        # prevent package selection or unattended installation.
+        $null = $_
+    }
+}
+
 function Read-InstallerSelection {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
         [scriptblock]$InputProvider = { param($Prompt) Read-Host -Prompt $Prompt },
+
+        [scriptblock]$ScreenClearer = { [Console]::Clear() },
 
         [bool]$InitialKeepDownloads = $false
     )
@@ -369,11 +454,13 @@ function Read-InstallerSelection {
     $dotNetChannels = 'All'
     $visualCppVersions = 'All'
     $keepDownloads = $InitialKeepDownloads
-
-    Write-InstallerBanner
+    $feedbackMessage = ''
+    $feedbackState = 'Info'
 
     while ($true) {
-        Write-InstallerSelectionMenu -SelectedComponents $selectedComponents -DotNetChannels $dotNetChannels -VisualCppVersions $visualCppVersions -KeepDownloads $keepDownloads
+        Clear-InstallerScreen -ScreenClearer $ScreenClearer
+        Write-InstallerBanner
+        Write-InstallerSelectionMenu -SelectedComponents $selectedComponents -DotNetChannels $dotNetChannels -VisualCppVersions $visualCppVersions -KeepDownloads $keepDownloads -FeedbackMessage $feedbackMessage -FeedbackState $feedbackState
         $rawChoice = & $InputProvider 'Selection'
         if ($null -eq $rawChoice) {
             throw 'Interactive input ended. Use explicit component switches for automation.'
@@ -383,12 +470,14 @@ function Read-InstallerSelection {
         if ($choice.Length -eq 0) {
             $enabledCount = @($selectedComponents.Values | Where-Object { $_ }).Count
             if ($enabledCount -eq 0) {
-                Write-InstallerStatus -State Failed -Message 'Select at least one package group before continuing.'
+                $feedbackMessage = 'Select at least one package group.'
+                $feedbackState = 'Failed'
                 continue
             }
 
             $components = @('DotNet', 'VisualCpp', 'DirectX') |
                 Where-Object { $selectedComponents[$_] }
+            Clear-InstallerScreen -ScreenClearer $ScreenClearer
             return [pscustomobject]@{
                 Components        = $components -join ','
                 DotNetChannels    = if ($selectedComponents.DotNet) { $dotNetChannels } else { 'All' }
@@ -399,12 +488,31 @@ function Read-InstallerSelection {
         }
 
         switch ($choice.ToUpperInvariant()) {
-            '1' { $selectedComponents.DotNet = -not $selectedComponents.DotNet; continue }
-            '2' { $selectedComponents.VisualCpp = -not $selectedComponents.VisualCpp; continue }
-            '3' { $selectedComponents.DirectX = -not $selectedComponents.DirectX; continue }
+            '1' {
+                $selectedComponents.DotNet = -not $selectedComponents.DotNet
+                $state = if ($selectedComponents.DotNet) { 'ON' } else { 'OFF' }
+                $feedbackMessage = ".NET SDKs turned $state."
+                $feedbackState = 'Updated'
+                continue
+            }
+            '2' {
+                $selectedComponents.VisualCpp = -not $selectedComponents.VisualCpp
+                $state = if ($selectedComponents.VisualCpp) { 'ON' } else { 'OFF' }
+                $feedbackMessage = "Visual C++ Redistributables turned $state."
+                $feedbackState = 'Updated'
+                continue
+            }
+            '3' {
+                $selectedComponents.DirectX = -not $selectedComponents.DirectX
+                $state = if ($selectedComponents.DirectX) { 'ON' } else { 'OFF' }
+                $feedbackMessage = "DirectX Legacy Runtime turned $state."
+                $feedbackState = 'Updated'
+                continue
+            }
             '4' {
                 if (-not $selectedComponents.DotNet) {
-                    Write-InstallerStatus -State Info -Message 'Enable .NET SDKs before choosing SDK channels.'
+                    $feedbackMessage = 'Option 4 is unavailable. Turn on package 1 first.'
+                    $feedbackState = 'Failed'
                     continue
                 }
                 $rawChannels = & $InputProvider '.NET SDK channels (All or example: 8.0,10.0)'
@@ -414,15 +522,19 @@ function Read-InstallerSelection {
                 $candidate = ([string]$rawChannels).Trim() -replace '[ \t]', ''
                 $channelPattern = '(?i)\A(?:All|\d+\.\d+)(?:,(?:\d+\.\d+))*\z'
                 if (-not (Test-InstallerMenuSelection -Value $candidate -Pattern $channelPattern)) {
-                    Write-InstallerStatus -State Failed -Message 'Use All or comma-separated SDK channels such as 8.0,10.0.'
+                    $feedbackMessage = 'Use All or comma-separated SDK channels such as 8.0,10.0.'
+                    $feedbackState = 'Failed'
                     continue
                 }
                 $dotNetChannels = $candidate
+                $feedbackMessage = ".NET SDK channels changed to $candidate."
+                $feedbackState = 'Updated'
                 continue
             }
             '5' {
                 if (-not $selectedComponents.VisualCpp) {
-                    Write-InstallerStatus -State Info -Message 'Enable Visual C++ before choosing release families.'
+                    $feedbackMessage = 'Option 5 is unavailable. Turn on package 2 first.'
+                    $feedbackState = 'Failed'
                     continue
                 }
                 $rawVersions = & $InputProvider 'Visual C++ release families (All or example: 2013,v14)'
@@ -432,10 +544,13 @@ function Read-InstallerSelection {
                 $candidate = ([string]$rawVersions).Trim() -replace '[ \t]', ''
                 $versionPattern = '(?i)\A(?:All|2005|2008|2010|2012|2013|v14)(?:,(?:2005|2008|2010|2012|2013|v14))*\z'
                 if (-not (Test-InstallerMenuSelection -Value $candidate -Pattern $versionPattern)) {
-                    Write-InstallerStatus -State Failed -Message 'Use All or release families from 2005, 2008, 2010, 2012, 2013, and v14.'
+                    $feedbackMessage = 'Use All or release families from 2005, 2008, 2010, 2012, 2013, and v14.'
+                    $feedbackState = 'Failed'
                     continue
                 }
                 $visualCppVersions = $candidate
+                $feedbackMessage = "Visual C++ release families changed to $candidate."
+                $feedbackState = 'Updated'
                 continue
             }
             'A' {
@@ -444,10 +559,23 @@ function Read-InstallerSelection {
                 $selectedComponents.DirectX = $true
                 $dotNetChannels = 'All'
                 $visualCppVersions = 'All'
+                $feedbackMessage = 'All package groups and version choices restored.'
+                $feedbackState = 'Updated'
                 continue
             }
-            'K' { $keepDownloads = -not $keepDownloads; continue }
+            'K' {
+                $keepDownloads = -not $keepDownloads
+                $feedbackMessage = if ($keepDownloads) {
+                    'Downloaded installers will be retained.'
+                }
+                else {
+                    'Downloaded installers will be removed after installation.'
+                }
+                $feedbackState = 'Updated'
+                continue
+            }
             'Q' {
+                Clear-InstallerScreen -ScreenClearer $ScreenClearer
                 Write-InstallerStatus -State Info -Message 'Installation cancelled before elevation or downloads.'
                 return [pscustomobject]@{
                     Components        = ''
@@ -458,7 +586,8 @@ function Read-InstallerSelection {
                 }
             }
             default {
-                Write-InstallerStatus -State Failed -Message "Unknown selection '$choice'. Choose 1-5, A, K, ENTER, or Q."
+                $feedbackMessage = "Unknown selection '$choice'. Choose 1-5, A, K, ENTER, or Q."
+                $feedbackState = 'Failed'
             }
         }
     }
