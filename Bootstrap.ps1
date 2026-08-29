@@ -11,14 +11,14 @@ commands should download Start.ps1 directly.
 
 [CmdletBinding()]
 param(
-    [string]$Components = 'All',
+    [string[]]$Components = 'All',
 
     [AllowEmptyString()]
-    [string]$ExcludeComponents = '',
+    [string[]]$ExcludeComponents = '',
 
-    [string]$DotNetChannels = 'All',
+    [string[]]$DotNetChannels = 'All',
 
-    [string]$VisualCppVersions = 'All',
+    [string[]]$VisualCppVersions = 'All',
 
     [switch]$KeepDownloads,
 
@@ -33,8 +33,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
 $startUri = 'https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1'
-$startHostPattern = '^raw\.githubusercontent\.com$'
-$temporaryStartPattern = '^msri-start-[a-f0-9]{32}\.ps1$'
+$startHostPattern = '\Araw\.githubusercontent\.com\z'
+$temporaryStartPattern = '\Amsri-start-[a-f0-9]{32}\.ps1\z'
 $temporaryStartPath = Join-Path ([IO.Path]::GetTempPath()) ('msri-start-{0}.ps1' -f [guid]::NewGuid().ToString('N'))
 $downloadedCompatibilityPath = Join-Path ([IO.Path]::GetTempPath()) 'msft-runtime-bootstrap.ps1'
 $shouldDeleteSelf = -not [string]::IsNullOrWhiteSpace($PSCommandPath) -and
@@ -72,8 +72,101 @@ function Test-SafeTemporaryStartPath {
     }
 }
 
+function Assert-SafeOptionValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value,
+        [Parameter(Mandatory = $true)][string]$Pattern,
+        [switch]$AllowEmpty
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        if ($AllowEmpty) { return }
+        throw "$Name cannot be empty."
+    }
+    if ($Value -notmatch $Pattern) {
+        throw "$Name contains an unsupported value or character: $Value"
+    }
+}
+
+function ConvertTo-DotNetChannelText {
+    param([Parameter(Mandatory = $true)][string[]]$Value)
+
+    $tokens = foreach ($item in $Value) {
+        foreach ($token in $item.Split(',')) {
+            if ($token -match '\A([ \t]*)(\d+)([ \t]*)\z') {
+                '{0}{1}.0{2}' -f $matches[1], $matches[2], $matches[3]
+            }
+            else {
+                $token
+            }
+        }
+    }
+    return $tokens -join ','
+}
+
+function Get-PreferredPowerShellExecutable {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        return (Get-Process -Id $PID -ErrorAction Stop).Path
+    }
+
+    $pwshCommand = Get-Command -Name 'pwsh.exe' -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $pwshCommand) {
+        return $pwshCommand.Source
+    }
+
+    $windowsPowerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $windowsPowerShellPath -PathType Leaf)) {
+        throw 'Neither pwsh.exe nor Windows PowerShell 5.1 could be found.'
+    }
+    return $windowsPowerShellPath
+}
+
+if ($null -ne $RemainingArguments -and $RemainingArguments.Count -gt 0) {
+    if ($RemainingArguments.Count -eq 1 -and $RemainingArguments[0] -ceq '--help') {
+        $ShowHelp = $true
+    }
+    else {
+        Write-Host "[FAILED  ] Unknown argument(s): $($RemainingArguments -join ' ')" -ForegroundColor Red
+        exit 1
+    }
+}
+
+$selectionOptionsWereBound = @(
+    @('Components', 'ExcludeComponents', 'DotNetChannels', 'VisualCppVersions') |
+        Where-Object { $PSBoundParameters.ContainsKey($_) }
+)
+$componentText = @($Components) -join ','
+$excludedComponentText = @($ExcludeComponents) -join ','
+$dotNetChannelText = ConvertTo-DotNetChannelText -Value $DotNetChannels
+$visualCppVersionText = @($VisualCppVersions) -join ','
+$componentPattern = '(?i)\A(?:All|DotNet|VisualCpp|DirectX)(?:[ \t]*,[ \t]*(?:All|DotNet|VisualCpp|DirectX))*\z'
+$dotNetPattern = '(?i)\A(?:All|\d+\.\d+)(?:[ \t]*,[ \t]*(?:All|\d+\.\d+))*\z'
+$visualCppPattern = '(?i)\A(?:All|2005|2008|2010|2012|2013|v14)(?:[ \t]*,[ \t]*(?:All|2005|2008|2010|2012|2013|v14))*\z'
 try {
-    Write-Host '[INFO    ] Bootstrap.ps1 is retained for compatibility; Start.ps1 is the current launcher.' -ForegroundColor Yellow
+    Assert-SafeOptionValue -Name 'Components' -Value $componentText -Pattern $componentPattern
+    Assert-SafeOptionValue -Name 'ExcludeComponents' -Value $excludedComponentText -Pattern $componentPattern -AllowEmpty
+    Assert-SafeOptionValue -Name 'DotNetChannels' -Value $dotNetChannelText -Pattern $dotNetPattern
+    Assert-SafeOptionValue -Name 'VisualCppVersions' -Value $visualCppVersionText -Pattern $visualCppPattern
+}
+catch {
+    Write-Host "[FAILED  ] Invalid compatibility options: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
+
+$normalizedComponents = $componentText -replace '\s', ''
+$normalizedExclusions = $excludedComponentText -replace '\s', ''
+$normalizedDotNetChannels = $dotNetChannelText -replace '\s', ''
+$normalizedVisualCppVersions = $visualCppVersionText -replace '\s', ''
+
+try {
+    Write-Host '[INFO    ] Bootstrap.ps1 is a compatibility launcher.' -ForegroundColor Yellow
+    Write-Host '[INFO    ] Start.ps1 is the current entry point.' -ForegroundColor Yellow
 
     $localStartPath = Join-Path $PSScriptRoot 'Start.ps1'
     if (Test-Path -LiteralPath $localStartPath -PathType Leaf) {
@@ -111,27 +204,25 @@ try {
         $ownsTemporaryStart = $true
     }
 
-    $powershellExecutable = (Get-Process -Id $PID -ErrorAction Stop).Path
-    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        $powershellExecutable = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    }
+    $powershellExecutable = Get-PreferredPowerShellExecutable
     $childArguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-        '-File', ('"{0}"' -f $startPath),
-        '-Components', ('"{0}"' -f $Components),
-        '-DotNetChannels', ('"{0}"' -f $DotNetChannels),
-        '-VisualCppVersions', ('"{0}"' -f $VisualCppVersions)
+        '-File', ('"{0}"' -f $startPath)
     )
-    if (-not [string]::IsNullOrWhiteSpace($ExcludeComponents)) {
-        $childArguments += @('-ExcludeComponents', ('"{0}"' -f $ExcludeComponents))
+    if ($selectionOptionsWereBound.Count -gt 0) {
+        $childArguments += @(
+            '-Components', ('"{0}"' -f $normalizedComponents),
+            '-DotNetChannels', ('"{0}"' -f $normalizedDotNetChannels),
+            '-VisualCppVersions', ('"{0}"' -f $normalizedVisualCppVersions)
+        )
+        if (-not [string]::IsNullOrWhiteSpace($normalizedExclusions)) {
+            $childArguments += @('-ExcludeComponents', ('"{0}"' -f $normalizedExclusions))
+        }
     }
     if ($KeepDownloads) { $childArguments += '-KeepDownloads' }
     if ($ShowHelp) { $childArguments += '-ShowHelp' }
-    if ($null -ne $RemainingArguments -and $RemainingArguments.Count -gt 0) {
-        $childArguments += $RemainingArguments
-    }
 
-    $childProcess = Start-Process -FilePath $powershellExecutable -ArgumentList $childArguments -Wait -PassThru -ErrorAction Stop
+    $childProcess = Start-Process -FilePath $powershellExecutable -ArgumentList $childArguments -NoNewWindow -Wait -PassThru -ErrorAction Stop
     $finalExitCode = $childProcess.ExitCode
 }
 catch {

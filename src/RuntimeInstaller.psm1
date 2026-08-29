@@ -2,11 +2,11 @@ Set-StrictMode -Version 2.0
 
 Import-Module -Name (Join-Path $PSScriptRoot 'ConsoleUI.psm1') -ErrorAction Stop
 
-$script:AllowedMicrosoftHostPattern = '^(?:aka\.ms|builds\.dotnet\.microsoft\.com|download\.microsoft\.com|download\.visualstudio\.microsoft\.com)$'
-$script:StableChannelPattern = '^\d+\.\d+$'
-$script:StableVersionPattern = '^\d+\.\d+\.\d+$'
-$script:Sha512Pattern = '^[A-Fa-f0-9]{128}$'
-$script:InstallerFileNamePattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.exe$'
+$script:AllowedMicrosoftHostPattern = '\A(?:aka\.ms|builds\.dotnet\.microsoft\.com|download\.microsoft\.com|download\.visualstudio\.microsoft\.com)\z'
+$script:StableChannelPattern = '\A\d+\.\d+\z'
+$script:StableVersionPattern = '\A\d+\.\d+\.\d+\z'
+$script:Sha512Pattern = '\A[A-Fa-f0-9]{128}\z'
+$script:InstallerFileNamePattern = '\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.exe\z'
 $script:DotNetReleasesIndexUri = 'https://builds.dotnet.microsoft.com/dotnet/release-metadata/releases-index.json'
 
 function Test-AllowedMicrosoftUri {
@@ -151,6 +151,25 @@ function Get-CurlExecutable {
     return $command.Source
 }
 
+function Get-CurlVersion {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    $curlExecutable = Get-CurlExecutable
+    $versionOutput = @(& $curlExecutable --version)
+    $curlExitCode = $LASTEXITCODE
+    if ($curlExitCode -ne 0 -or $versionOutput.Count -eq 0) {
+        throw "Unable to determine the installed curl version (exit code $curlExitCode)."
+    }
+
+    $versionLine = [string]$versionOutput[0]
+    if ($versionLine -notmatch '\Acurl\s+([^\s]+)') {
+        throw "Unable to parse the installed curl version from: $versionLine"
+    }
+    return [string]$matches[1]
+}
+
 function Invoke-CurlDownload {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -260,20 +279,140 @@ function Confirm-DownloadedPackage {
     }
 }
 
+function ConvertFrom-WindowsMachineType {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [uint16]$MachineType
+    )
+
+    switch ($MachineType) {
+        0x014c { return 'x86' }
+        0x8664 { return 'x64' }
+        0xAA64 { return 'arm64' }
+        0x01c4 { throw '32-bit Windows on ARM is not supported.' }
+        default { throw ('Unsupported native Windows machine type: 0x{0:X4}' -f $MachineType) }
+    }
+}
+
+function Get-NativeWindowsArchitecture {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    $nativeMethods = 'MsftRuntimeInstaller.NativeArchitecture' -as [type]
+    if ($null -eq $nativeMethods) {
+        $nativeMethods = Add-Type -Namespace MsftRuntimeInstaller -Name NativeArchitecture -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool IsWow64Process2(
+    System.IntPtr processHandle,
+    out System.UInt16 processMachine,
+    out System.UInt16 nativeMachine);
+'@ -PassThru -ErrorAction Stop
+    }
+
+    [uint16]$processMachine = 0
+    [uint16]$nativeMachine = 0
+    $currentProcess = [Diagnostics.Process]::GetCurrentProcess()
+    try {
+        try {
+            $succeeded = $nativeMethods::IsWow64Process2(
+                $currentProcess.Handle,
+                [ref]$processMachine,
+                [ref]$nativeMachine
+            )
+        }
+        catch {
+            $underlyingException = $_.Exception
+            if ($null -ne $underlyingException.InnerException) {
+                $underlyingException = $underlyingException.InnerException
+            }
+            if ($underlyingException -is [EntryPointNotFoundException]) {
+                # Windows versions before 10 1709 do not expose this API. Their
+                # environment and RuntimeInformation values are used below.
+                return $null
+            }
+            throw
+        }
+
+        if (-not $succeeded) {
+            $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            throw "IsWow64Process2 failed with Win32 error $lastError."
+        }
+    }
+    finally {
+        $currentProcess.Dispose()
+    }
+
+    return ConvertFrom-WindowsMachineType -MachineType $nativeMachine
+}
+
 function Get-TargetArchitecture {
     [CmdletBinding()]
     [OutputType([string])]
     param(
-        [Nullable[bool]]$Is64BitOperatingSystem = $null
+        [Nullable[bool]]$Is64BitOperatingSystem = $null,
+
+        [ValidateSet('', 'X86', 'X64', 'Arm', 'Arm64')]
+        [string]$OperatingSystemArchitecture = ''
     )
 
-    $is64Bit = [Environment]::Is64BitOperatingSystem
-    if ($PSBoundParameters.ContainsKey('Is64BitOperatingSystem')) {
-        $is64Bit = [bool]$Is64BitOperatingSystem
+    if ($PSBoundParameters.ContainsKey('OperatingSystemArchitecture')) {
+        switch ($OperatingSystemArchitecture.ToUpperInvariant()) {
+            'X86' { return 'x86' }
+            'X64' { return 'x64' }
+            'ARM64' { return 'arm64' }
+            'ARM' { throw '32-bit Windows on ARM is not supported.' }
+        }
     }
 
-    if ($is64Bit) { return 'x64' }
-    return 'x86'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $nativeArchitecture = Get-NativeWindowsArchitecture
+        if (-not [string]::IsNullOrWhiteSpace($nativeArchitecture)) {
+            return $nativeArchitecture
+        }
+
+        $environmentArchitecture = [string]$env:PROCESSOR_ARCHITEW6432
+        if ([string]::IsNullOrWhiteSpace($environmentArchitecture)) {
+            $environmentArchitecture = [string]$env:PROCESSOR_ARCHITECTURE
+        }
+        switch ($environmentArchitecture.ToUpperInvariant()) {
+            'X86' { return 'x86' }
+            'AMD64' { return 'x64' }
+            'ARM64' { return 'arm64' }
+            'ARM' { throw '32-bit Windows on ARM is not supported.' }
+        }
+    }
+
+    $reportedArchitecture = ''
+    try {
+        $reportedArchitecture = [string][Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    }
+    catch {
+        $reportedArchitecture = ''
+    }
+
+    switch ($reportedArchitecture.ToUpperInvariant()) {
+        'X86' { return 'x86' }
+        'X64' { return 'x64' }
+        'ARM64' { return 'arm64' }
+        'ARM' { throw '32-bit Windows on ARM is not supported.' }
+    }
+
+    if ($PSBoundParameters.ContainsKey('Is64BitOperatingSystem')) {
+        if (-not [bool]$Is64BitOperatingSystem) { return 'x86' }
+        throw 'Unable to distinguish an unknown 64-bit Windows architecture from ARM64.'
+    }
+
+    if ([Environment]::Is64BitOperatingSystem) {
+        throw 'Unable to determine the native 64-bit Windows architecture safely.'
+    }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        return 'x86'
+    }
+
+    throw "Unsupported operating-system architecture: $reportedArchitecture"
 }
 
 function Get-InstallerResult {
@@ -281,16 +420,29 @@ function Get-InstallerResult {
     [OutputType([string])]
     param(
         [Parameter(Mandatory = $true)]
-        [int]$ExitCode
+        [int]$ExitCode,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('DotNet', 'VisualCpp', 'DirectX', 'Extractor')]
+        [string]$InstallerType
     )
 
-    switch ($ExitCode) {
-        0 { return 'Success' }
-        1638 { return 'Success' }
-        1641 { return 'RestartRequired' }
-        3010 { return 'RestartRequired' }
-        default { return 'Failure' }
+    if ($ExitCode -eq 0) { return 'Success' }
+
+    switch ($InstallerType) {
+        'DotNet' {
+            if ($ExitCode -eq 3010) { return 'RestartRequired' }
+        }
+        'VisualCpp' {
+            if ($ExitCode -eq 1638) { return 'AlreadyInstalled' }
+            if ($ExitCode -eq 3010) { return 'RestartRequired' }
+        }
+        'DirectX' {
+            if ($ExitCode -eq 3010) { return 'RestartRequired' }
+        }
     }
+
+    return 'Failure'
 }
 
 function Get-SupportedDotNetChannel {
@@ -360,7 +512,7 @@ function Resolve-DotNetSdkPackage {
         [psobject]$ReleaseMetadata,
 
         [Parameter(Mandatory = $true)]
-        [ValidateSet('x86', 'x64')]
+        [ValidateSet('x86', 'x64', 'arm64')]
         [string]$Architecture
     )
 
@@ -387,7 +539,7 @@ function Resolve-DotNetSdkPackage {
 
     $targetRid = "win-$Architecture"
     $fileMatches = @($sdkMatches[0].files | Where-Object {
-        [string]$_.rid -ceq $targetRid -and [string]$_.url -match '\.exe$'
+        [string]$_.rid -ceq $targetRid -and [string]$_.url -match '\.exe\z'
     })
     if ($fileMatches.Count -ne 1) {
         throw "Expected exactly one $targetRid EXE for SDK $latestSdk; found $($fileMatches.Count)."
@@ -398,7 +550,7 @@ function Resolve-DotNetSdkPackage {
     $fileName = [IO.Path]::GetFileName($validatedUri.AbsolutePath)
     Assert-InstallerFileName -FileName $fileName
 
-    $expectedNamePattern = '^dotnet-sdk-{0}-win-{1}\.exe$' -f [regex]::Escape($latestSdk), [regex]::Escape($Architecture)
+    $expectedNamePattern = '\Adotnet-sdk-{0}-win-{1}\.exe\z' -f [regex]::Escape($latestSdk), [regex]::Escape($Architecture)
     if ($fileName -notmatch $expectedNamePattern) {
         throw "SDK URL filename does not match resolved version and architecture: $fileName"
     }
@@ -426,7 +578,7 @@ function Get-DotNetSdkPackage {
         [string]$WorkspacePath,
 
         [Parameter(Mandatory = $true)]
-        [ValidateSet('x86', 'x64')]
+        [ValidateSet('x86', 'x64', 'arm64')]
         [string]$Architecture,
 
         [datetime]$AsOfUtc = [datetime]::UtcNow
@@ -641,7 +793,7 @@ function Get-VisualCppPackage {
         [hashtable]$Configuration,
 
         [Parameter(Mandatory = $true)]
-        [ValidateSet('x86', 'x64')]
+        [ValidateSet('x86', 'x64', 'arm64')]
         [string]$OperatingSystemArchitecture,
 
         [string]$VersionSelection = 'All'
@@ -686,7 +838,7 @@ function Get-VisualCppPackage {
             throw "Visual C++ package $fileName has invalid installer arguments."
         }
 
-        if (($OperatingSystemArchitecture -eq 'x64' -or $architecture -eq 'x86') -and $selectedVersions -contains $version) {
+        if (($OperatingSystemArchitecture -in @('x64', 'arm64') -or $architecture -eq 'x86') -and $selectedVersions -contains $version) {
             $selectedPackages += [pscustomobject]@{
                 Name         = $name
                 Version      = $version
@@ -709,7 +861,7 @@ function Test-MicrosoftSignerSubject {
         [string]$Subject
     )
 
-    return $Subject -match '(?:^|,\s*)O=Microsoft Corporation(?:,|$)'
+    return $Subject -match '(?:\A|,\s*)O=Microsoft Corporation(?:,|\z)'
 }
 
 function Assert-MicrosoftAuthenticodeSignature {
@@ -752,7 +904,7 @@ function Test-SafeInstallerWorkspacePath {
         if (-not [string]::Equals($parentPath, $fullTempPath, $comparison)) { return $false }
 
         $leafName = Split-Path -Leaf $fullWorkspacePath
-        return $leafName -match '^msft-runtime-installer-[a-f0-9]{32}$'
+        return $leafName -match '\Amsft-runtime-installer-[a-f0-9]{32}\z'
     }
     catch {
         return $false
@@ -808,7 +960,11 @@ function Invoke-InstallerPackage {
         [string]$LiteralPath,
 
         [Parameter(Mandatory = $true)]
-        [string[]]$Arguments
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('DotNet', 'VisualCpp', 'DirectX', 'Extractor')]
+        [string]$InstallerType
     )
 
     if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
@@ -826,13 +982,20 @@ function Invoke-InstallerPackage {
         throw
     }
     $installTimer.Stop()
-    $result = Get-InstallerResult -ExitCode $process.ExitCode
+    $result = Get-InstallerResult -ExitCode $process.ExitCode -InstallerType $InstallerType
     if ($result -eq 'Failure') {
+        if ($InstallerType -eq 'VisualCpp' -and $process.ExitCode -eq 1641) {
+            Write-InstallerStatus -State Failed -Message ("{0} reported an installer-initiated restart despite the no-restart option." -f $Name)
+            throw "$Name breached the no-restart contract with exit code 1641."
+        }
         Write-InstallerStatus -State Failed -Message ("{0} | exit code {1} | {2}" -f $Name, $process.ExitCode, (Format-InstallerDuration -Duration $installTimer.Elapsed))
         throw "$Name failed with exit code $($process.ExitCode)."
     }
     if ($result -eq 'RestartRequired') {
         Write-InstallerStatus -State Restart -Message ("{0} | exit code {1} | {2}" -f $Name, $process.ExitCode, (Format-InstallerDuration -Duration $installTimer.Elapsed))
+    }
+    elseif ($result -eq 'AlreadyInstalled') {
+        Write-InstallerStatus -State Info -Message ("{0} | a newer or equivalent version is already installed | exit code {1} | {2}" -f $Name, $process.ExitCode, (Format-InstallerDuration -Duration $installTimer.Elapsed))
     }
     else {
         Write-InstallerStatus -State Ok -Message ("{0} | exit code {1} | {2}" -f $Name, $process.ExitCode, (Format-InstallerDuration -Duration $installTimer.Elapsed))
@@ -879,7 +1042,7 @@ function Invoke-DotNetSdkInstallation {
 
     foreach ($package in $Packages) {
         $installerPath = Receive-DotNetSdkPackage -Package $package -WorkspacePath $WorkspacePath
-        $result = Invoke-InstallerPackage -Name ([string]$package.Name) -LiteralPath $installerPath -Arguments @($package.Arguments)
+        $result = Invoke-InstallerPackage -Name ([string]$package.Name) -LiteralPath $installerPath -Arguments @($package.Arguments) -InstallerType DotNet
         if ($result -eq 'RestartRequired') { $RestartRequired.Value = $true }
         $CompletedPackageCount.Value = [int]$CompletedPackageCount.Value + 1
     }
@@ -892,7 +1055,7 @@ function Invoke-VisualCppInstallation {
         [hashtable]$Configuration,
 
         [Parameter(Mandatory = $true)]
-        [ValidateSet('x86', 'x64')]
+        [ValidateSet('x86', 'x64', 'arm64')]
         [string]$OperatingSystemArchitecture,
 
         [string]$VersionSelection = 'All',
@@ -910,7 +1073,7 @@ function Invoke-VisualCppInstallation {
     $packages = @(Get-VisualCppPackage -Configuration $Configuration -OperatingSystemArchitecture $OperatingSystemArchitecture -VersionSelection $VersionSelection)
     foreach ($package in $packages) {
         $installerPath = Receive-SignedMicrosoftPackage -Package $package -WorkspacePath $WorkspacePath
-        $result = Invoke-InstallerPackage -Name ([string]$package.Name) -LiteralPath $installerPath -Arguments @($package.Arguments)
+        $result = Invoke-InstallerPackage -Name ([string]$package.Name) -LiteralPath $installerPath -Arguments @($package.Arguments) -InstallerType VisualCpp
         if ($result -eq 'RestartRequired') { $RestartRequired.Value = $true }
         $CompletedPackageCount.Value = [int]$CompletedPackageCount.Value + 1
     }
@@ -942,14 +1105,16 @@ function Invoke-DirectXInstallation {
     $extractorPath = Receive-SignedMicrosoftPackage -Package $package -WorkspacePath $WorkspacePath
     $extractionPath = Join-Path ([IO.Path]::GetFullPath($WorkspacePath)) 'directx-extracted'
     $null = New-Item -Path $extractionPath -ItemType Directory -ErrorAction Stop
-    $extractResult = Invoke-InstallerPackage -Name "$($package.Name) extraction" -LiteralPath $extractorPath -Arguments @('/Q', ('/T:"{0}"' -f $extractionPath))
+    $extractResult = Invoke-InstallerPackage -Name "$($package.Name) extraction" -LiteralPath $extractorPath -Arguments @('/Q', ('/T:"{0}"' -f $extractionPath)) -InstallerType Extractor
 
     $setupPath = Join-Path $extractionPath $setupName
     if (-not (Test-Path -LiteralPath $setupPath -PathType Leaf)) {
         throw "DirectX extraction did not produce $setupName."
     }
-    Assert-MicrosoftAuthenticodeSignature -LiteralPath $setupPath
-    $setupResult = Invoke-InstallerPackage -Name ([string]$package.Name) -LiteralPath $setupPath -Arguments @('/silent')
+    Confirm-DownloadedPackage -LiteralPath $setupPath -Verification {
+        Assert-MicrosoftAuthenticodeSignature -LiteralPath $setupPath
+    }
+    $setupResult = Invoke-InstallerPackage -Name ([string]$package.Name) -LiteralPath $setupPath -Arguments @('/silent') -InstallerType DirectX
 
     if ($extractResult -eq 'RestartRequired' -or $setupResult -eq 'RestartRequired') {
         $RestartRequired.Value = $true
@@ -963,6 +1128,7 @@ Export-ModuleMember -Function @(
     'Assert-MicrosoftUri',
     'Assert-Sha512',
     'Get-CurlArgument',
+    'Get-CurlVersion',
     'Get-DotNetSdkPackage',
     'Get-InstallerResult',
     'Get-SupportedDotNetChannel',

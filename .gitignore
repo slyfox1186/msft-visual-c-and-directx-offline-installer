@@ -32,6 +32,7 @@
 !.env.example
 *.key
 *.p12
+*.pem
 *.pfx
 
 # Editor and IDE metadata.
@@ -56,8 +57,13 @@ $RECYCLE.BIN/
 /.worktrees/
 /worktrees/
 
-# Local Codex handoff instructions requested by the maintainer.
+# Local agent-specific contributor and handoff instructions.
 /AGENTS.md
+/CLAUDE.md
+
+# Temporary local inputs and outputs for the independent Claude review.
+/CLAUDE_CRITIQUE_REQUEST.md
+/CLAUDE_CRITIQUE.md
 
 # Local copy/paste draft for the maintainer's Reddit post.
 /REDDIT-POST-UPDATE.md

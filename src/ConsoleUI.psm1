@@ -174,19 +174,25 @@ function Write-InstallerHelp {
     Write-Host ''
     Write-Host 'USAGE' -ForegroundColor Cyan
     Write-Host '  powershell.exe -ExecutionPolicy Bypass -File .\Install.ps1 [options]'
+    Write-Host '  pwsh.exe -NoProfile -File .\Install.ps1 [options]'
+    Write-Host ''
+    Write-Host 'Run without selection options to open the interactive package menu.'
+    Write-Host 'Explicit selection options bypass the menu for automation.'
     Write-Host ''
     Write-Host 'OPTIONS' -ForegroundColor Cyan
     Write-Host '  -Components <list>          All (default), DotNet, VisualCpp, DirectX'
     Write-Host '  -ExcludeComponents <list>   Remove component groups from the enabled set'
     Write-Host '  -DotNetChannels <list>      All, or supported channels such as 8.0,10.0'
     Write-Host '  -VisualCppVersions <list>   All, 2005, 2008, 2010, 2012, 2013, or v14'
-    Write-Host '  -KeepDownloads              Keep verified Microsoft installers'
+    Write-Host '  -KeepDownloads              Keep the Microsoft installer workspace'
     Write-Host '  -h | -Help | --help         Show help without UAC or downloads'
     Write-Host ''
     Write-Host 'RULES' -ForegroundColor Cyan
     Write-Host '  * Separate multiple values with commas. Values are case-insensitive.'
     Write-Host '  * Architecture is automatic and cannot be overridden.'
     Write-Host '  * Explicit .NET channels must still be supported by Microsoft.'
+    Write-Host '  * Microsoft progress windows may appear; they require no clicks.'
+    Write-Host '  * Packages never restart Windows automatically.'
     Write-Host '  * Downloads are removed by default, including after failures.'
     Write-Host ''
     Write-Host 'EXAMPLES' -ForegroundColor Cyan
@@ -198,7 +204,180 @@ function Write-InstallerHelp {
     Write-Host 'EXIT CODES' -ForegroundColor Cyan
     Write-Host '  0     Completed successfully'
     Write-Host '  1     Validation, download, verification, installation, or cleanup failed'
+    Write-Host '  2     Cancelled from the interactive selector before installation'
     Write-Host '  3010  Completed successfully; restart Windows to finish'
+}
+
+function Write-InstallerSelectionMenu {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$SelectedComponents,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DotNetChannels,
+
+        [Parameter(Mandatory = $true)]
+        [string]$VisualCppVersions,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$KeepDownloads
+    )
+
+    $dotNetState = if ($SelectedComponents.DotNet) { 'X' } else { ' ' }
+    $visualCppState = if ($SelectedComponents.VisualCpp) { 'X' } else { ' ' }
+    $directXState = if ($SelectedComponents.DirectX) { 'X' } else { ' ' }
+    $keepState = if ($KeepDownloads) { 'X' } else { ' ' }
+    $dotNetDetail = if ($SelectedComponents.DotNet) { $DotNetChannels } else { 'disabled' }
+    $visualCppDetail = if ($SelectedComponents.VisualCpp) { $VisualCppVersions } else { 'disabled' }
+
+    Write-Host ''
+    Write-Host ('-' * $script:ConsoleWidth) -ForegroundColor DarkGray
+    Write-Host '  PACKAGE SELECTION' -ForegroundColor Cyan
+    Write-Host ('-' * $script:ConsoleWidth) -ForegroundColor DarkGray
+    Write-Host ("  [1] [{0}] .NET SDKs" -f $dotNetState)
+    Write-Host ("  [2] [{0}] Visual C++ Runtimes" -f $visualCppState)
+    Write-Host ("  [3] [{0}] DirectX Legacy Runtimes   June 2010" -f $directXState)
+    Write-Host ("  [4]     .NET channels               {0}" -f $dotNetDetail)
+    Write-Host ("  [5]     Visual C++ versions         {0}" -f $visualCppDetail)
+    Write-Host ("  [K] [{0}] Keep downloaded files" -f $keepState)
+    Write-Host ''
+    Write-Host '  1-3 toggle | 4-5 customize | A selects all | K keeps downloads'
+    Write-Host '  Press ENTER when ready to install, or Q to cancel.'
+}
+
+function Test-InstallerMenuSelection {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)][string]$Value,
+        [Parameter(Mandatory = $true)][string]$Pattern
+    )
+
+    if ($Value -notmatch $Pattern) { return $false }
+    $tokens = @($Value.Split(','))
+    if ($tokens.Count -gt 1 -and $tokens -icontains 'All') { return $false }
+
+    $seen = @{}
+    foreach ($token in $tokens) {
+        $key = $token.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { return $false }
+        $seen[$key] = $true
+    }
+    return $true
+}
+
+function Read-InstallerSelection {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [scriptblock]$InputProvider = { param($Prompt) Read-Host -Prompt $Prompt },
+
+        [bool]$InitialKeepDownloads = $false
+    )
+
+    $selectedComponents = @{
+        DotNet   = $true
+        VisualCpp = $true
+        DirectX = $true
+    }
+    $dotNetChannels = 'All'
+    $visualCppVersions = 'All'
+    $keepDownloads = $InitialKeepDownloads
+
+    Write-InstallerBanner
+    Write-InstallerStatus -State Info -Message 'Choose packages, then press ENTER when ready.'
+
+    while ($true) {
+        Write-InstallerSelectionMenu -SelectedComponents $selectedComponents -DotNetChannels $dotNetChannels -VisualCppVersions $visualCppVersions -KeepDownloads $keepDownloads
+        $rawChoice = & $InputProvider 'Selection'
+        if ($null -eq $rawChoice) {
+            throw 'Interactive input ended. Use explicit component switches for automation.'
+        }
+        $choice = ([string]$rawChoice).Trim()
+
+        if ($choice.Length -eq 0) {
+            $enabledCount = @($selectedComponents.Values | Where-Object { $_ }).Count
+            if ($enabledCount -eq 0) {
+                Write-InstallerStatus -State Failed -Message 'Select at least one package group before continuing.'
+                continue
+            }
+
+            $components = @('DotNet', 'VisualCpp', 'DirectX') |
+                Where-Object { $selectedComponents[$_] }
+            return [pscustomobject]@{
+                Components        = $components -join ','
+                DotNetChannels    = if ($selectedComponents.DotNet) { $dotNetChannels } else { 'All' }
+                VisualCppVersions = if ($selectedComponents.VisualCpp) { $visualCppVersions } else { 'All' }
+                KeepDownloads     = $keepDownloads
+                Cancelled         = $false
+            }
+        }
+
+        switch ($choice.ToUpperInvariant()) {
+            '1' { $selectedComponents.DotNet = -not $selectedComponents.DotNet; continue }
+            '2' { $selectedComponents.VisualCpp = -not $selectedComponents.VisualCpp; continue }
+            '3' { $selectedComponents.DirectX = -not $selectedComponents.DirectX; continue }
+            '4' {
+                if (-not $selectedComponents.DotNet) {
+                    Write-InstallerStatus -State Info -Message 'Enable .NET SDKs before choosing channels.'
+                    continue
+                }
+                $rawChannels = & $InputProvider '.NET channels (All or 8.0,10.0)'
+                if ($null -eq $rawChannels) {
+                    throw 'Interactive input ended while choosing .NET channels.'
+                }
+                $candidate = ([string]$rawChannels).Trim() -replace '[ \t]', ''
+                $channelPattern = '(?i)\A(?:All|\d+\.\d+)(?:,(?:\d+\.\d+))*\z'
+                if (-not (Test-InstallerMenuSelection -Value $candidate -Pattern $channelPattern)) {
+                    Write-InstallerStatus -State Failed -Message 'Use All or comma-separated channels such as 8.0,10.0.'
+                    continue
+                }
+                $dotNetChannels = $candidate
+                continue
+            }
+            '5' {
+                if (-not $selectedComponents.VisualCpp) {
+                    Write-InstallerStatus -State Info -Message 'Enable Visual C++ before choosing versions.'
+                    continue
+                }
+                $rawVersions = & $InputProvider 'VC++ versions (All or 2005,...,v14)'
+                if ($null -eq $rawVersions) {
+                    throw 'Interactive input ended while choosing Visual C++ versions.'
+                }
+                $candidate = ([string]$rawVersions).Trim() -replace '[ \t]', ''
+                $versionPattern = '(?i)\A(?:All|2005|2008|2010|2012|2013|v14)(?:,(?:2005|2008|2010|2012|2013|v14))*\z'
+                if (-not (Test-InstallerMenuSelection -Value $candidate -Pattern $versionPattern)) {
+                    Write-InstallerStatus -State Failed -Message 'Use All or versions from 2005, 2008, 2010, 2012, 2013, and v14.'
+                    continue
+                }
+                $visualCppVersions = $candidate
+                continue
+            }
+            'A' {
+                $selectedComponents.DotNet = $true
+                $selectedComponents.VisualCpp = $true
+                $selectedComponents.DirectX = $true
+                $dotNetChannels = 'All'
+                $visualCppVersions = 'All'
+                continue
+            }
+            'K' { $keepDownloads = -not $keepDownloads; continue }
+            'Q' {
+                Write-InstallerStatus -State Info -Message 'Installation cancelled before elevation or downloads.'
+                return [pscustomobject]@{
+                    Components        = ''
+                    DotNetChannels    = 'All'
+                    VisualCppVersions = 'All'
+                    KeepDownloads     = $keepDownloads
+                    Cancelled         = $true
+                }
+            }
+            default {
+                Write-InstallerStatus -State Failed -Message "Unknown selection '$choice'. Choose 1-5, A, K, ENTER, or Q."
+            }
+        }
+    }
 }
 
 function Write-InstallerSystemSummary {
@@ -209,6 +388,8 @@ function Write-InstallerSystemSummary {
 
         [Parameter(Mandatory = $true)]
         [string]$PowerShellVersion,
+
+        [string]$PowerShellEdition = '',
 
         [Parameter(Mandatory = $true)]
         [string]$CurlVersion,
@@ -226,11 +407,18 @@ function Write-InstallerSystemSummary {
         [bool]$DirectXSelected
     )
 
-    Write-InstallerStatus -State Info -Message "Windows architecture: $Architecture | Windows PowerShell: $PowerShellVersion"
+    $powerShellDisplay = $PowerShellVersion
+    if (-not [string]::IsNullOrWhiteSpace($PowerShellEdition)) {
+        $powerShellDisplay = "$PowerShellVersion ($PowerShellEdition)"
+    }
+    Write-InstallerStatus -State Info -Message "Windows architecture: $Architecture | PowerShell: $powerShellDisplay"
     Write-InstallerStatus -State Info -Message "curl: $CurlVersion"
     Write-InstallerStatus -State Info -Message ("Plan: {0}" -f (Format-InstallerPlan -DotNetPackageCount $DotNetPackageCount -VisualCppPackageCount $VisualCppPackageCount -DirectXSelected $DirectXSelected))
     Write-InstallerStatus -State Info -Message "Temporary workspace: $WorkspacePath"
-    Write-InstallerStatus -State Info -Message 'Trust: HTTPS Microsoft hosts, SHA-512 metadata, and Microsoft Authenticode signatures'
+    $trustControls = @('HTTPS-restricted Microsoft downloads')
+    if ($DotNetPackageCount -gt 0) { $trustControls += 'SHA-512 metadata' }
+    if ($VisualCppPackageCount -gt 0 -or $DirectXSelected) { $trustControls += 'Microsoft Authenticode signatures' }
+    Write-InstallerStatus -State Info -Message ("Trust: {0}" -f ($trustControls -join ' | '))
 }
 
 function Write-InstallerSection {
@@ -265,7 +453,7 @@ function Write-InstallerStatus {
         [string]$Message
     )
 
-    $timestamp = Get-Date -Format 'HH:mm:ss'
+    $timestamp = [datetime]::Now.ToString('HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
     $prefix = '[{0}] {1} ' -f $timestamp, (Get-InstallerStatusBadge -State $State)
     Write-InstallerWrappedLine -Prefix $prefix -Text $Message -Color (Get-InstallerStatusColor -State $State)
 }
@@ -308,7 +496,12 @@ function Write-InstallerSummary {
 
     Write-InstallerStatus -State Info -Message ("Packages completed: {0} | Elapsed: {1}" -f $CompletedPackageCount, (Format-InstallerDuration -Duration $Duration))
     if (-not [string]::IsNullOrWhiteSpace($RetainedWorkspacePath)) {
-        Write-InstallerStatus -State Retained -Message "Verified downloads retained at: $RetainedWorkspacePath"
+        if ($Outcome -eq 'Failed') {
+            Write-InstallerStatus -State Retained -Message "Installer workspace retained for diagnosis at: $RetainedWorkspacePath"
+        }
+        else {
+            Write-InstallerStatus -State Retained -Message "Installer workspace retained at: $RetainedWorkspacePath"
+        }
     }
     elseif ($CleanupSucceeded) {
         Write-InstallerStatus -State Cleanup -Message 'Temporary download files were removed.'
@@ -324,6 +517,7 @@ Export-ModuleMember -Function @(
     'Format-InstallerDuration',
     'Format-InstallerPlan',
     'Get-InstallerStatusBadge',
+    'Read-InstallerSelection',
     'Write-InstallerBanner',
     'Write-InstallerHelp',
     'Write-InstallerSection',

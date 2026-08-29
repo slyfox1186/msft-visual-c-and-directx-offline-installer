@@ -6,7 +6,7 @@
             Architecture = 'x86'
             Uri          = 'https://download.microsoft.com/download/8/B/4/8B42259F-5D70-43F4-AC2E-4B208FD8D66A/vcredist_x86.EXE'
             FileName     = 'vcredist-2005-x86.exe'
-            Arguments    = @('/q')
+            Arguments    = @('/q', '/r:n')
         }
         @{
             Name         = 'Microsoft Visual C++ 2005 SP1 Redistributable (x64)'
@@ -14,7 +14,7 @@
             Architecture = 'x64'
             Uri          = 'https://download.microsoft.com/download/8/B/4/8B42259F-5D70-43F4-AC2E-4B208FD8D66A/vcredist_x64.EXE'
             FileName     = 'vcredist-2005-x64.exe'
-            Arguments    = @('/q')
+            Arguments    = @('/q', '/r:n')
         }
         @{
             Name         = 'Microsoft Visual C++ 2008 SP1 Redistributable (x86)'
