@@ -8,17 +8,19 @@ The project downloads packages directly from Microsoft at runtime. It resolves e
 
 ## Quick start
 
-Open **Command Prompt** (`cmd.exe`) and paste this one-line command:
+1. Open the Windows **Start** menu and search for **Command Prompt**.
+2. Select **Run as administrator**, then approve the Windows UAC prompt.
+3. Paste this one-line command into the Administrator Command Prompt and press **Enter**:
 
 ```bat
 start "Microsoft Runtime Installer" /max powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$msriSource=@(& curl.exe -fsS 'https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1');if($LASTEXITCODE -ne 0 -or $msriSource.Count -eq 0){exit 1};try{$msriScript=[ScriptBlock]::Create($msriSource -join [Environment]::NewLine)}catch{exit 1};& $msriScript" && exit
 ```
 
-Command Prompt starts one independent, maximized PowerShell window and then closes immediately. The PowerShell window owns the complete run: it displays the interactive selector with every component initially enabled, downloads and validates the supporting source, waits for installation, removes temporary source files, and closes when finished. After successful source validation, the selector clears the bootstrap progress from the display; bootstrap errors remain visible if validation fails. Toggle packages or change optional settings, then press **Enter** when ready. Windows requests administrator approval only after the selection is complete. Downloads, verification, and installation then run automatically. Supported Microsoft progress windows remain visible, but they require no clicks or other input. The scripts suppress automatic restarts and report when a manual restart is needed.
+The Administrator Command Prompt starts one independent, maximized PowerShell window and then closes immediately. The PowerShell window inherits administrator access and owns the complete run: it displays the interactive selector with every component initially enabled, downloads and validates the supporting source, waits for installation, removes temporary source files, and closes when finished. After successful source validation, the selector clears the bootstrap progress from the display; bootstrap errors remain visible if validation fails. Toggle packages or change optional settings, then press **Enter** when ready. Downloads, verification, and installation then run automatically. Supported Microsoft progress windows remain visible, but they require no clicks or other input. The scripts suppress automatic restarts and report when a manual restart is needed.
 
 The command does not create a bootstrap script in `%TEMP%`. The independent PowerShell process uses `curl.exe` to collect the complete `Start.ps1` response, rejects curl failures and empty responses, then parses the source as one script before invoking it. A malformed response fails closed with exit code `1` and cannot execute partially. This avoids the statement-at-a-time behavior of `-Command -` with multi-line advanced scripts. The launcher prefers `pwsh.exe` from `PATH` when PowerShell 7 is installed and otherwise continues with Windows PowerShell 5.1. Its validated child stays in the same keyboard-connected PowerShell window.
 
-If the original Command Prompt was not already elevated, Windows opens another maximized PowerShell window after the selector when UAC approval is required. Starting from an Administrator Command Prompt keeps the complete run in the independent maximized window opened by the command.
+Run the command from an **Administrator Command Prompt**. The installer retains its own elevation check as a safety fallback, but starting elevated keeps the complete run in the single independent, maximized PowerShell window opened by the command.
 
 No repository ZIP is downloaded or extracted. The launcher resolves `main` to one validated Git commit, then uses `curl.exe` to download `Install.ps1`, both PowerShell modules, and the package configuration individually from that immutable revision. It validates each GitHub URL, downloaded file, and PowerShell syntax before execution, then removes those temporary source files when the installer exits.
 
@@ -129,7 +131,7 @@ After cleanup, an interactive run replaces the progress log with a concise final
 - Windows PowerShell 5.1 (built in) or PowerShell 7 (`pwsh.exe` in `PATH`); PowerShell 7 is preferred automatically
 - `curl.exe` available in `PATH`
 - An internet connection that can reach GitHub and the approved Microsoft download hosts
-- Administrator approval through Windows UAC
+- Administrator Command Prompt (`cmd.exe` opened with **Run as administrator**)
 - Sufficient free space for the selected installers and installed SDKs
 
 The `-ExecutionPolicy Bypass` option applies only to the newly launched PowerShell process. It does not change the machine's persistent execution-policy configuration.
@@ -169,7 +171,7 @@ This repository intentionally contains no Microsoft EXE, CAB, DLL, MSI, or archi
 
 ## Verification status
 
-Before publication, the installer was checked with a fixture/unit suite, an explicit no-archive regression, PowerShell parser validation, PSScriptAnalyzer 1.25.0 (including Windows PowerShell 5.1 syntax, command, and type compatibility rules), live commit-pinned GitHub source resolution, live Microsoft metadata resolution for x86, x64, and ARM64, and live checks of every configured endpoint. A fresh live audit also downloaded all 11 fixed legacy packages and confirmed every reviewed SHA-256. On 2026-08-29, both Microsoft v14 aliases served file version `14.51.36247.0`, which is the current reviewed downgrade floor. Native Windows UAC, Authenticode, and installer execution could not be exercised from the Linux development host; that limitation remains until a native-Windows smoke test is completed.
+Before publication, the installer was checked with a fixture/unit suite, an explicit no-archive regression, PowerShell parser validation, PSScriptAnalyzer 1.25.0 (including Windows PowerShell 5.1 syntax, command, and type compatibility rules), live commit-pinned GitHub source resolution, live Microsoft metadata resolution for x86, x64, and ARM64, and live checks of every configured endpoint. A fresh live audit also downloaded all 11 fixed legacy packages and confirmed every reviewed SHA-256. On 2026-08-29, both Microsoft v14 aliases served file version `14.51.36247.0`, which is the current reviewed downgrade floor. A native Windows 11 smoke test subsequently exercised the selector, elevation, passive installers, cleanup, and a successful completion on the preceding revision. The current discovery-collision correction has passed live source-plan and cleanup regressions; its final native Windows confirmation is pending.
 
 ## Third-party software
 

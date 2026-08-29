@@ -623,7 +623,10 @@ function Get-MicrosoftDiscoveryDocument {
     if (-not (Test-Path -LiteralPath $discoveryDirectory -PathType Container)) {
         $null = New-Item -Path $discoveryDirectory -ItemType Directory -ErrorAction Stop
     }
-    $destinationPath = Join-Path $discoveryDirectory ('source-{0:D2}.txt' -f ($Cache.Count + 1))
+    # A cache is scoped to one resolver call, while the protected workspace is
+    # shared by every selected component. Use a per-download name so separate
+    # resolver calls cannot allocate the same destination inside that workspace.
+    $destinationPath = Join-Path $discoveryDirectory ('source-{0}.txt' -f [guid]::NewGuid().ToString('N'))
     $download = Invoke-CurlDownload -Uri $pageUri.AbsoluteUri -DestinationPath $destinationPath -DisplayName 'Microsoft package catalog' -ShowProgress $false -UriPurpose Discovery
     if ($download.Length -gt $script:MaximumDiscoveryDocumentBytes) {
         throw "Microsoft discovery document exceeds the $($script:MaximumDiscoveryDocumentBytes)-byte safety limit."
