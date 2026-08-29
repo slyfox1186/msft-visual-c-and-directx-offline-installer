@@ -14,7 +14,7 @@ Open **Command Prompt** (`cmd.exe`) and paste this one-line command:
 start "Microsoft Runtime Installer" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$msriSource=@(& curl.exe -fsS 'https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1');if($LASTEXITCODE -ne 0 -or $msriSource.Count -eq 0){exit 1};try{$msriScript=[ScriptBlock]::Create($msriSource -join [Environment]::NewLine)}catch{exit 1};& $msriScript" && exit
 ```
 
-Command Prompt starts one independent PowerShell window and then closes immediately. The PowerShell window owns the complete run: it displays a package-selection menu with every component initially enabled, downloads and validates the supporting source, waits for installation, removes temporary source files, and closes when finished. Toggle package groups or choose version filters, then press **Enter** when ready. Windows requests administrator approval only after the selection is complete. Downloads, verification, and installation then run automatically. Supported Microsoft progress windows remain visible, but they require no clicks or other input. The scripts suppress automatic restarts and report when a manual restart is needed.
+Command Prompt starts one independent PowerShell window and then closes immediately. The PowerShell window owns the complete run: it displays a compact install plan with every component initially enabled, downloads and validates the supporting source, waits for installation, removes temporary source files, and closes when finished. Explicit `ON`/`OFF` states distinguish package toggles from version choices, and the primary **Enter** action is highlighted. Toggle packages or choose version filters, then press **Enter** when ready. Windows requests administrator approval only after the selection is complete. Downloads, verification, and installation then run automatically. Supported Microsoft progress windows remain visible, but they require no clicks or other input. The scripts suppress automatic restarts and report when a manual restart is needed.
 
 The command does not create a bootstrap script in `%TEMP%`. The independent PowerShell process uses `curl.exe` to collect the complete `Start.ps1` response, rejects curl failures and empty responses, then parses the source as one script before invoking it. A malformed response fails closed with exit code `1` and cannot execute partially. This avoids the statement-at-a-time behavior of `-Command -` with multi-line advanced scripts. The launcher prefers `pwsh.exe` from `PATH` when PowerShell 7 is installed and otherwise continues with Windows PowerShell 5.1. Its validated child stays in the same keyboard-connected PowerShell window.
 
@@ -25,6 +25,8 @@ No repository ZIP is downloaded or extracted. The launcher resolves `main` to on
 Review [Start.ps1](Start.ps1) and [Install.ps1](Install.ps1) before running them if you prefer to audit remote scripts first. [Bootstrap.ps1](Bootstrap.ps1) remains only as a compatibility entry point for the original published command.
 
 ## Interactive package selection
+
+The selector presents one aligned install plan and one customization section. Text labels communicate every state without relying on color: package rows show `ON` or `OFF`, filter rows show their current values, unavailable filters identify the package that must be enabled, and the download-retention row shows `Yes` or `No`. The menu also states that current .NET SDK and Visual C++ v14 versions are resolved from Microsoft when the run begins.
 
 The default menu provides these controls:
 
@@ -112,7 +114,7 @@ The installer:
 - suppresses automatic package restarts so the user remains in control; and
 - creates a GUID-named workspace directly below `%TEMP%` and validates its exact shape before recursive cleanup.
 
-The console dashboard shows each download, verification, installation, restart, and cleanup state. Output is ASCII-safe and uses standard Windows console colors so copied troubleshooting logs remain readable.
+The console dashboard shows each download, verification, installation, restart, and cleanup state. Its compact selector uses aligned rows, explicit text states, and a highlighted primary action. Output is ASCII-safe and uses standard Windows console colors only as reinforcement, so the interface and copied troubleshooting logs remain understandable without color.
 
 ## Requirements
 

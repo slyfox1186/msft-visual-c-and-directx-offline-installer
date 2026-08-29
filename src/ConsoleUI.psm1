@@ -211,6 +211,45 @@ function Write-InstallerHelp {
     Write-Host '  3010  Completed successfully; restart Windows to finish'
 }
 
+function Write-InstallerSelectionRow {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Key,
+
+        [ValidateSet('', 'ON', 'OFF')]
+        [string]$State = '',
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Label,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Detail,
+
+        [ConsoleColor]$DetailColor = [ConsoleColor]::Gray
+    )
+
+    Write-Host '  [' -NoNewline
+    Write-Host $Key -ForegroundColor Cyan -NoNewline
+    Write-Host ']  ' -NoNewline
+
+    if ([string]::IsNullOrEmpty($State)) {
+        Write-Host (' ' * 5) -NoNewline
+    }
+    else {
+        $stateColor = if ($State -eq 'ON') { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow }
+        Write-Host ('[{0,-3}]' -f $State) -ForegroundColor $stateColor -NoNewline
+    }
+
+    Write-Host '  ' -NoNewline
+    Write-Host $Label.PadRight(20) -NoNewline
+    Write-Host '  ' -NoNewline
+    Write-Host $Detail -ForegroundColor $DetailColor
+}
+
 function Write-InstallerSelectionMenu {
     [CmdletBinding()]
     param(
@@ -227,23 +266,38 @@ function Write-InstallerSelectionMenu {
         [bool]$KeepDownloads
     )
 
-    $dotNetState = if ($SelectedComponents.DotNet) { 'X' } else { ' ' }
-    $visualCppState = if ($SelectedComponents.VisualCpp) { 'X' } else { ' ' }
-    $directXState = if ($SelectedComponents.DirectX) { 'X' } else { ' ' }
-    $keepState = if ($KeepDownloads) { 'X' } else { ' ' }
-    $dotNetAction = if ($SelectedComponents.DotNet) { '>' } else { '-' }
-    $visualCppAction = if ($SelectedComponents.VisualCpp) { '>' } else { '-' }
+    $dotNetState = if ($SelectedComponents.DotNet) { 'ON' } else { 'OFF' }
+    $visualCppState = if ($SelectedComponents.VisualCpp) { 'ON' } else { 'OFF' }
+    $directXState = if ($SelectedComponents.DirectX) { 'ON' } else { 'OFF' }
+    $dotNetPackageDetail = if ($SelectedComponents.DotNet) {
+        'Latest stable in each selected channel'
+    }
+    else {
+        'Not selected'
+    }
+    $visualCppPackageDetail = if ($SelectedComponents.VisualCpp) {
+        'Latest v14 plus final legacy releases'
+    }
+    else {
+        'Not selected'
+    }
+    $directXPackageDetail = if ($SelectedComponents.DirectX) {
+        'Final June 2010 legacy runtime'
+    }
+    else {
+        'Not selected'
+    }
     $dotNetDetail = if (-not $SelectedComponents.DotNet) {
-        'Enable [1] first'
+        'Unavailable (enable 1)'
     }
     elseif ($DotNetChannels.Trim() -ieq 'All') {
-        'All supported (latest stable)'
+        'All supported channels'
     }
     else {
         $DotNetChannels
     }
     $visualCppDetail = if (-not $SelectedComponents.VisualCpp) {
-        'Enable [2] first'
+        'Unavailable (enable 2)'
     }
     elseif ($VisualCppVersions.Trim() -ieq 'All') {
         'All release families'
@@ -251,29 +305,30 @@ function Write-InstallerSelectionMenu {
     else {
         $VisualCppVersions
     }
+    $dotNetDetailColor = if ($SelectedComponents.DotNet) { [ConsoleColor]::Cyan } else { [ConsoleColor]::Yellow }
+    $visualCppDetailColor = if ($SelectedComponents.VisualCpp) { [ConsoleColor]::Cyan } else { [ConsoleColor]::Yellow }
+    $keepDetail = if ($KeepDownloads) { 'Yes' } else { 'No' }
+    $keepDetailColor = if ($KeepDownloads) { [ConsoleColor]::Yellow } else { [ConsoleColor]::Green }
 
     Write-Host ''
-    Write-Host ('-' * $script:ConsoleWidth) -ForegroundColor DarkGray
-    Write-Host '  PACKAGE GROUPS' -ForegroundColor Cyan
-    Write-Host ('-' * $script:ConsoleWidth) -ForegroundColor DarkGray
-    Write-Host ("  [1] [{0}] {1,-30}{2}" -f $dotNetState, '.NET SDKs', 'Latest stable per supported channel')
-    Write-Host ("  [2] [{0}] {1,-30}{2}" -f $visualCppState, 'Visual C++ Runtimes', 'Latest supported v14 + final legacy')
-    Write-Host ("  [3] [{0}] {1,-30}{2}" -f $directXState, 'DirectX Legacy Runtimes', 'Final June 2010 release')
+    Write-Host '  INSTALL PLAN' -ForegroundColor Cyan
     Write-Host ''
-    Write-Host '  VERSION FILTERS (OPTIONAL)' -ForegroundColor Cyan
-    Write-Host ("  [4] [{0}] {1,-35}{2}" -f $dotNetAction, 'Choose .NET SDK channels', $dotNetDetail)
-    Write-Host ("  [5] [{0}] {1,-35}{2}" -f $visualCppAction, 'Choose Visual C++ release families', $visualCppDetail)
+    Write-InstallerSelectionRow -Key 1 -State $dotNetState -Label '.NET SDKs' -Detail $dotNetPackageDetail
+    Write-InstallerSelectionRow -Key 2 -State $visualCppState -Label 'Visual C++' -Detail $visualCppPackageDetail
+    Write-InstallerSelectionRow -Key 3 -State $directXState -Label 'DirectX' -Detail $directXPackageDetail
     Write-Host ''
-    Write-Host '  RELEASE RESOLUTION' -ForegroundColor Cyan
-    Write-Host '  Dynamic: .NET -> latest stable per selected supported channel'
-    Write-Host '           VC++ v14 -> latest supported Microsoft release'
-    Write-Host '  Fixed:   final legacy VC++ (2005-2013) and DirectX June 2010 releases.'
+    Write-Host '  CUSTOMIZE' -ForegroundColor Cyan
     Write-Host ''
-    Write-Host '  OTHER OPTIONS' -ForegroundColor Cyan
-    Write-Host ("  [K] [{0}] Keep downloaded files" -f $keepState)
+    Write-InstallerSelectionRow -Key 4 -Label '.NET channels' -Detail $dotNetDetail -DetailColor $dotNetDetailColor
+    Write-InstallerSelectionRow -Key 5 -Label 'Visual C++ families' -Detail $visualCppDetail -DetailColor $visualCppDetailColor
+    Write-InstallerSelectionRow -Key K -Label 'Keep downloads' -Detail $keepDetail -DetailColor $keepDetailColor
     Write-Host ''
-    Write-Host '  1-3 toggle groups | 4-5 choose versions | K keeps downloads'
-    Write-Host '  A selects all packages | ENTER installs | Q cancels'
+    Write-Host '  Latest .NET and VC++ v14 versions resolve from Microsoft at run time.' -ForegroundColor Gray
+    Write-Host ''
+    Write-Host '  ' -NoNewline
+    Write-Host 'ENTER' -ForegroundColor Green -NoNewline
+    Write-Host '  Install selected packages'
+    Write-Host '  1-3 Toggle | 4-5 Choose versions | A Select all | K Keep | Q Cancel' -ForegroundColor Gray
 }
 
 function Test-InstallerMenuSelection {
@@ -316,7 +371,6 @@ function Read-InstallerSelection {
     $keepDownloads = $InitialKeepDownloads
 
     Write-InstallerBanner
-    Write-InstallerStatus -State Info -Message 'Choose package groups and optional versions, then press ENTER.'
 
     while ($true) {
         Write-InstallerSelectionMenu -SelectedComponents $selectedComponents -DotNetChannels $dotNetChannels -VisualCppVersions $visualCppVersions -KeepDownloads $keepDownloads
