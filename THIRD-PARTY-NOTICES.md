@@ -16,4 +16,4 @@ This independent project is not affiliated with, sponsored by, or endorsed by Mi
 
 ## GitHub distribution infrastructure
 
-The curl bootstrap retrieves this project's own source archive through GitHub. GitHub's service terms and privacy statement apply to that transfer. Microsoft package payloads are fetched from Microsoft endpoints, not from GitHub.
+The curl launcher retrieves this project's own source archive through GitHub. GitHub's service terms and privacy statement apply to that transfer. Microsoft package payloads are fetched from Microsoft endpoints, not from GitHub.

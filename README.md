@@ -11,39 +11,39 @@ The project downloads packages directly from Microsoft at runtime. It does not s
 Open **Command Prompt** (`cmd.exe`) and paste this one-line curl command:
 
 ```bat
-curl.exe --fail --location --max-redirs 10 --proto =https --proto-redir =https --tlsv1.2 --retry 4 --retry-delay 2 --retry-connrefused --output "%TEMP%\msft-runtime-bootstrap.ps1" "https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Bootstrap.ps1" && "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\msft-runtime-bootstrap.ps1" -Components All
+curl.exe -fsSL "https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1" -o "%TEMP%\msri.ps1" && powershell.exe -ep bypass -f "%TEMP%\msri.ps1"
 ```
 
-The command downloads the small PowerShell bootstrap, which obtains one coherent source archive from this repository. `Install.ps1` then requests administrator access through Windows UAC, downloads the selected Microsoft packages, verifies them, installs them silently, and removes the temporary files. The downloaded bootstrap also removes itself when the run ends.
+The command downloads the PowerShell launcher, which owns the detailed network, validation, retry, and cleanup policy and obtains one coherent source archive from this repository. `Install.ps1` then requests administrator access through Windows UAC, downloads the selected Microsoft packages, verifies them, installs them silently, and removes the temporary files. The downloaded launcher also removes itself when the run ends.
 
-Review [Bootstrap.ps1](Bootstrap.ps1) and [Install.ps1](Install.ps1) before running them if you prefer to audit remote scripts first.
+Review [Start.ps1](Start.ps1) and [Install.ps1](Install.ps1) before running them if you prefer to audit remote scripts first. [Bootstrap.ps1](Bootstrap.ps1) remains only as a compatibility entry point for the original published command.
 
 ## Choose what to install
 
-The default installs all components. Add options after the bootstrap path in the quick-start command to narrow the plan.
+The default installs all components. Add options after the launcher path in the quick-start command to narrow the plan.
 
 Install only .NET SDK channels 8.0 and 10.0:
 
 ```bat
-curl.exe --fail --location --max-redirs 10 --proto =https --proto-redir =https --tlsv1.2 --retry 4 --retry-delay 2 --retry-connrefused --output "%TEMP%\msft-runtime-bootstrap.ps1" "https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Bootstrap.ps1" && "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\msft-runtime-bootstrap.ps1" -Components DotNet -DotNetChannels 8.0,10.0
+curl.exe -fsSL "https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1" -o "%TEMP%\msri.ps1" && powershell.exe -ep bypass -f "%TEMP%\msri.ps1" -Components DotNet -DotNetChannels 8.0,10.0
 ```
 
 Install only Visual C++ 2013 and the latest v14 family:
 
 ```bat
-curl.exe --fail --location --max-redirs 10 --proto =https --proto-redir =https --tlsv1.2 --retry 4 --retry-delay 2 --retry-connrefused --output "%TEMP%\msft-runtime-bootstrap.ps1" "https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Bootstrap.ps1" && "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\msft-runtime-bootstrap.ps1" -Components VisualCpp -VisualCppVersions 2013,v14
+curl.exe -fsSL "https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1" -o "%TEMP%\msri.ps1" && powershell.exe -ep bypass -f "%TEMP%\msri.ps1" -Components VisualCpp -VisualCppVersions 2013,v14
 ```
 
 Install everything except DirectX and keep the verified downloads:
 
 ```bat
-curl.exe --fail --location --max-redirs 10 --proto =https --proto-redir =https --tlsv1.2 --retry 4 --retry-delay 2 --retry-connrefused --output "%TEMP%\msft-runtime-bootstrap.ps1" "https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Bootstrap.ps1" && "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\msft-runtime-bootstrap.ps1" -ExcludeComponents DirectX -KeepDownloads
+curl.exe -fsSL "https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1" -o "%TEMP%\msri.ps1" && powershell.exe -ep bypass -f "%TEMP%\msri.ps1" -ExcludeComponents DirectX -KeepDownloads
 ```
 
 Use `-h`, `-Help`, or `--help` to display the complete built-in menu without elevation or package downloads:
 
 ```bat
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\msft-runtime-bootstrap.ps1" --help
+curl.exe -fsSL "https://raw.githubusercontent.com/slyfox1186/msft-visual-c-and-directx-offline-installer/main/Start.ps1" -o "%TEMP%\msri.ps1" && powershell.exe -ep bypass -f "%TEMP%\msri.ps1" --help
 ```
 
 ## Options
