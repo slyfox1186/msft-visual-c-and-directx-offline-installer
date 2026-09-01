@@ -71,7 +71,7 @@ The opening must plainly state that the repository contains no bundled Microsoft
 
 `Quick start` must preserve the existing `bat` launcher byte-for-byte and use the Reddit post's three explicit Administrator Command Prompt steps.
 
-`Using the installer` must state the default selections, keys `1` through `5`, blank `Selection` behavior, `A`, `K`, and `Q`, unattended behavior, manual restart policy, cleanup/result summary, optional `R` report, and PowerShell 7 preference with Windows PowerShell 5.1 fallback.
+`Using the installer` must follow the Reddit post's beginner flow: state the default selections, explain keys `1` through `5` as complete actions, and tell the user to leave `Selection` blank to install. Keep the optional `A`, `K`, and `Q` shortcuts out of the beginner instructions. Then cover unattended behavior, manual restart policy, cleanup/result summary, the optional `R` report, and PowerShell 7 preference with Windows PowerShell 5.1 fallback.
 
 `Safety checks` must retain approved HTTPS hosts, .NET SHA-512, fixed-package SHA-256, Microsoft Authenticode, Visual C++ v14 version floor, immutable GitHub revision, pre-execution plan resolution, and guarded temporary cleanup in short bullets.
 

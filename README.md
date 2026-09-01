@@ -28,16 +28,12 @@ A maximized Administrator PowerShell window opens, and Command Prompt closes.
 
 ## Using the installer
 
-All package groups are enabled by default.
+In the PowerShell menu:
 
-At the `Selection` prompt, use these controls. Press **Enter** after typing a key:
-
-- `1`, `2`, or `3` turns a package group on or off.
-- `4` or `5` lets you choose specific .NET channels or Visual C++ release families.
-- `A` restores the default selection.
-- `K` keeps the downloaded files instead of removing them afterward.
-- `Q` cancels before installation.
-- When you are ready to install, leave the prompt blank and press **Enter**.
+- All package groups are enabled by default.
+- To turn a package group on or off, type `1`, `2`, or `3`, then press **Enter**.
+- To choose specific .NET channels or Visual C++ release families, type `4` or `5`, then press **Enter** and follow the prompt.
+- When you are ready to install, leave the `Selection` prompt blank and press **Enter**.
 
 Installation is unattended after confirmation. Microsoft progress windows may appear, but they require no clicks. The installer never restarts Windows automatically; it tells you when a manual restart is needed.
 
