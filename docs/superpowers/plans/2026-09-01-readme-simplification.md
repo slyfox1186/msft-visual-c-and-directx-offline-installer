@@ -134,7 +134,19 @@ jq -Rs '{text: ., mode: "gfm", context: "slyfox1186/msft-visual-c-and-directx-of
 
 Expected: exit `0` with rendered headings, code blocks, tables, and links visible in the returned HTML.
 
-- [ ] **Step 3: Run help without elevation or downloads**
+- [ ] **Step 3: Validate local and external link destinations**
+
+Run:
+
+```bash
+for linked_file in Start.ps1 Install.ps1 Bootstrap.ps1 THIRD-PARTY-NOTICES.md; do test -f "$linked_file"; done
+test "$(gh api repos/slyfox1186/msft-visual-c-and-directx-offline-installer --jq '.has_issues')" = "true"
+curl -L --fail --silent --show-error --output /dev/null 'https://www.reddit.com/r/Batch/comments/1mwbttn/comment/p6iy6km/'
+```
+
+Expected: exit `0`; every relative file exists, GitHub Issues is enabled, and the linked Reddit page responds successfully.
+
+- [ ] **Step 4: Run help without elevation or downloads**
 
 Run:
 
@@ -144,7 +156,7 @@ pwsh -NoProfile -File ./Install.ps1 -Help
 
 Expected: exit `0` and complete usage, options, rules, examples, and exit-code help.
 
-- [ ] **Step 4: Parse every PowerShell source and data file**
+- [ ] **Step 5: Parse every PowerShell source and data file**
 
 Run:
 
@@ -154,7 +166,7 @@ pwsh -NoProfile -Command '$failed = $false; Get-ChildItem -Path . -Recurse -File
 
 Expected: exit `0` with no parser errors.
 
-- [ ] **Step 5: Run the configured static analyzer**
+- [ ] **Step 6: Run the configured static analyzer**
 
 Run:
 
@@ -164,7 +176,7 @@ pwsh -NoProfile -Command 'Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSS
 
 Expected: exit `0` with no analyzer findings.
 
-- [ ] **Step 6: Inspect the complete change set**
+- [ ] **Step 7: Inspect the complete change set**
 
 Run:
 
@@ -205,7 +217,7 @@ Expected: exit `0`; local commits are based on the latest `origin/main` without 
 
 - [ ] **Step 3: Re-run final verification after rebase**
 
-Repeat Task 3 Steps 1, 3, 4, and 5.
+Repeat Task 3 Steps 1, 4, 5, and 6.
 
 Expected: every command exits `0` on the exact commit that will be pushed.
 
