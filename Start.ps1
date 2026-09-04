@@ -148,32 +148,138 @@ function Write-LauncherStatus {
     }
 }
 
+function Get-LauncherConsoleWidth {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param()
+
+    # Mirrors ConsoleUI.psm1's policy so launcher and installer screens agree on
+    # one width: 78 when output is redirected, otherwise the live console width
+    # bounded to the supported 72 through 110 range.
+    $width = 78
+    try {
+        if (-not [Console]::IsOutputRedirected -and [Console]::WindowWidth -gt 1) {
+            $width = [Console]::WindowWidth - 1
+        }
+    }
+    catch {
+        $width = 78
+    }
+
+    return [math]::Min(110, [math]::Max(72, $width))
+}
+
+function Write-LauncherWrappedLine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Prefix,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Text,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 110)]
+        [int]$Width,
+
+        [ConsoleColor]$PrefixColor = [ConsoleColor]::White,
+
+        [ConsoleColor]$TextColor = [ConsoleColor]::Gray
+    )
+
+    # The prefix doubles as the hanging indent, so a wrapped option description
+    # or note stays inside the column its first line started in.
+    $continuationPrefix = ' ' * $Prefix.Length
+    $remainingText = $Text.Trim()
+    $firstLine = $true
+    while ($remainingText.Length -gt 0) {
+        $availableWidth = $Width - $Prefix.Length
+        if ($availableWidth -lt 1) { $availableWidth = 1 }
+        if ($remainingText.Length -le $availableWidth) {
+            $lineText = $remainingText
+            $remainingText = ''
+        }
+        else {
+            $breakPosition = $remainingText.LastIndexOf(' ', $availableWidth)
+            if ($breakPosition -le 0) { $breakPosition = $availableWidth }
+            $lineText = $remainingText.Substring(0, $breakPosition).TrimEnd()
+            $remainingText = $remainingText.Substring($breakPosition).TrimStart()
+        }
+
+        if ($firstLine) {
+            Write-Host $Prefix -NoNewline -ForegroundColor $PrefixColor
+            $firstLine = $false
+        }
+        else {
+            Write-Host $continuationPrefix -NoNewline
+        }
+        Write-Host $lineText -ForegroundColor $TextColor
+    }
+}
+
 function Write-LauncherHelp {
+    [CmdletBinding()]
+    param()
+
+    # The launcher is standalone by design, so it repeats the installer's visual
+    # language locally instead of importing ConsoleUI.psm1: '=' closes the
+    # screen, an inset '-' opens a group, and columns are computed, not counted.
+    $width = Get-LauncherConsoleWidth
+    $indent = '  '
+    $columnGap = 2
+    $screenRule = '=' * $width
+    $groupRule = $indent + ('-' * [math]::Max(1, ($width - (2 * $indent.Length))))
+    $options = @(
+        @{ Term = '-Components <list>'; Text = 'All (default), DotNet, VisualCpp, DirectX' },
+        @{ Term = '-ExcludeComponents <list>'; Text = 'Remove component groups from the enabled set' },
+        @{ Term = '-DotNetChannels <list>'; Text = 'All, or supported channels such as 8.0,10.0' },
+        @{ Term = '-VisualCppVersions <list>'; Text = 'All, 2005, 2008, 2010, 2012, 2013, or v14' },
+        @{ Term = '-KeepDownloads'; Text = 'Keep the Microsoft installer workspace' },
+        @{ Term = '-ReportPath <path>'; Text = 'Write a UTF-8 .txt diagnostic report' },
+        @{ Term = '-h | -Help | --help'; Text = 'Show help without UAC or downloads' }
+    )
+    $notes = @(
+        'With no selection options, an interactive package menu opens.',
+        'Explicit package options bypass the menu for automation.',
+        '.NET resolves the latest stable SDK in each selected supported channel.',
+        'Visual C++ v14 tracks Microsoft''s latest supported release.',
+        'Legacy Visual C++ and DirectX packages are final fixed releases.',
+        'Every Microsoft package source is resolved when the run starts.',
+        'Launcher support files are fetched individually and are always temporary.',
+        'KeepDownloads applies only to Microsoft metadata and installer packages.',
+        'PowerShell 7 is preferred when pwsh.exe is in PATH; 5.1 is the fallback.'
+    )
+
+    $termWidth = 0
+    foreach ($option in $options) {
+        $termLength = ([string]$option.Term).Length
+        if ($termLength -gt $termWidth) { $termWidth = $termLength }
+    }
+    $termWidth += $columnGap
+
     Write-Host ''
-    Write-Host ('=' * 78) -ForegroundColor Cyan
-    Write-Host '  MICROSOFT RUNTIME INSTALLER - CURL LAUNCHER' -ForegroundColor Cyan
-    Write-Host ('=' * 78) -ForegroundColor Cyan
-    Write-Host 'USAGE' -ForegroundColor Cyan
-    Write-Host '  Start.ps1 [options]'
+    Write-Host $screenRule -ForegroundColor Cyan
+    Write-Host ($indent + 'MICROSOFT RUNTIME INSTALLER - CURL LAUNCHER') -ForegroundColor White
+    Write-Host $screenRule -ForegroundColor Cyan
     Write-Host ''
-    Write-Host 'OPTIONS' -ForegroundColor Cyan
-    Write-Host '  -Components <list>          All (default), DotNet, VisualCpp, DirectX'
-    Write-Host '  -ExcludeComponents <list>   Remove component groups from the enabled set'
-    Write-Host '  -DotNetChannels <list>      All, or supported channels such as 8.0,10.0'
-    Write-Host '  -VisualCppVersions <list>   All, 2005, 2008, 2010, 2012, 2013, or v14'
-    Write-Host '  -KeepDownloads              Keep the Microsoft installer workspace'
-    Write-Host '  -ReportPath <path>          Write a UTF-8 .txt diagnostic report'
-    Write-Host '  -h | -Help | --help         Show help without UAC or downloads'
+    Write-Host ($indent + 'USAGE') -ForegroundColor Cyan
+    Write-Host $groupRule -ForegroundColor DarkGray
+    Write-Host ($indent + 'Start.ps1 [options]') -ForegroundColor Gray
     Write-Host ''
-    Write-Host 'With no selection options, an interactive package menu opens.'
-    Write-Host 'Explicit package options bypass the menu for automation.'
-    Write-Host '.NET resolves the latest stable SDK in each selected supported channel.'
-    Write-Host 'Visual C++ v14 tracks Microsoft''s latest supported release.'
-    Write-Host 'Legacy Visual C++ and DirectX packages are final fixed releases.'
-    Write-Host 'Every Microsoft package source is resolved when the run starts.'
-    Write-Host 'Launcher support files are fetched individually and are always temporary.'
-    Write-Host 'KeepDownloads applies only to Microsoft metadata and installer packages.'
-    Write-Host 'PowerShell 7 is preferred when pwsh.exe is in PATH; 5.1 is the fallback.'
+    Write-Host ($indent + 'OPTIONS') -ForegroundColor Cyan
+    Write-Host $groupRule -ForegroundColor DarkGray
+    foreach ($option in $options) {
+        Write-LauncherWrappedLine -Prefix ($indent + ([string]$option.Term).PadRight($termWidth)) -Text ([string]$option.Text) -Width $width -PrefixColor White -TextColor Gray
+    }
+    Write-Host ''
+    Write-Host ($indent + 'NOTES') -ForegroundColor Cyan
+    Write-Host $groupRule -ForegroundColor DarkGray
+    foreach ($note in $notes) {
+        Write-LauncherWrappedLine -Prefix ($indent + '* ') -Text $note -Width $width -PrefixColor DarkGray -TextColor Gray
+    }
+    Write-Host ''
 }
 
 function Test-AllowedGitHubUri {

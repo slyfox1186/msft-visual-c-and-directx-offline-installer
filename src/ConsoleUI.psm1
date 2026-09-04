@@ -7,6 +7,62 @@ $script:StatusBadgeWidth = 8
 $script:DiagnosticRunId = ''
 $script:DiagnosticEvents = New-Object 'Collections.Generic.List[object]'
 
+# ---------------------------------------------------------------------------
+# Shared visual system
+#
+# Every screen is drawn from the constants below so layout is computed instead
+# of hand-padded, and so one color keeps one meaning across the banner, the
+# selector, the run log, and the final screens. All output stays inside ASCII
+# 0x20-0x7E and uses only standard ConsoleColor values.
+# ---------------------------------------------------------------------------
+
+# Left margin shared by every non-log line.
+$script:ContentIndent = 2
+
+# Gap between any two aligned columns.
+$script:ColumnGap = 2
+
+# Rule vocabulary. '=' closes a top-level screen; '-' separates a section of
+# the run log or a group inside a screen. Group rules are inset by the content
+# indent so nesting reads without any extra glyphs.
+$script:ScreenRuleCharacter = '='
+$script:SectionRuleCharacter = '-'
+
+# Selector grid: "  [1]  ON   Label" with the detail line under the label.
+$script:MenuKeyWidth = 3
+$script:MenuStateWidth = 3
+$script:MenuTextColumn = $script:ContentIndent + $script:MenuKeyWidth + $script:ColumnGap + $script:MenuStateWidth + $script:ColumnGap
+
+# Label column for label/value rows on the system, completion, and report
+# screens. Derived from the longest label actually rendered so the column never
+# has to be counted by hand and cannot drift when wording changes.
+$script:DetailLabels = @(
+    'RESULT', 'PACKAGES', 'ELAPSED', 'RESTART', 'DOWNLOADS', 'ERROR',
+    'REPORT DIR', 'REPORT FILE', 'REPORT ERROR', 'FOLDER', 'FILE',
+    'INFO', 'UPDATED'
+)
+# Windows PowerShell 5.1 returns Measure-Object -Maximum as a nullable double,
+# which would make every column width a double. Widen the longest label with an
+# explicit integer loop so PadRight always receives an int.
+$script:DetailLabelWidth = 0
+foreach ($detailLabel in $script:DetailLabels) {
+    if ($detailLabel.Length -gt $script:DetailLabelWidth) {
+        $script:DetailLabelWidth = $detailLabel.Length
+    }
+}
+$script:DetailLabelWidth += $script:ColumnGap
+
+# Semantic palette. Accent marks structure, title marks the one value that
+# matters most on a screen, muted marks subordinate chrome, and the three state
+# colors never mean anything other than success, attention, and failure.
+$script:AccentColor = [ConsoleColor]::Cyan
+$script:TitleColor = [ConsoleColor]::White
+$script:BodyColor = [ConsoleColor]::Gray
+$script:MutedColor = [ConsoleColor]::DarkGray
+$script:SuccessColor = [ConsoleColor]::Green
+$script:WarningColor = [ConsoleColor]::Yellow
+$script:FailureColor = [ConsoleColor]::Red
+
 function Get-InstallerConsoleWidth {
     [CmdletBinding()]
     [OutputType([int])]
@@ -121,13 +177,17 @@ function Get-InstallerStatusColor {
         [string]$State
     )
 
+    # Badge colors carry the same meaning as every other screen: green is a
+    # completed step, yellow needs attention, red failed, muted is background
+    # bookkeeping, and accent marks the work that is currently running.
     switch ($State) {
-        'Ok' { return [ConsoleColor]::Green }
-        'Restart' { return [ConsoleColor]::Yellow }
-        'Retained' { return [ConsoleColor]::Yellow }
-        'Failed' { return [ConsoleColor]::Red }
-        'Cleanup' { return [ConsoleColor]::DarkCyan }
-        default { return [ConsoleColor]::Cyan }
+        'Ok' { return $script:SuccessColor }
+        'Restart' { return $script:WarningColor }
+        'Retained' { return $script:WarningColor }
+        'Failed' { return $script:FailureColor }
+        'Cleanup' { return $script:MutedColor }
+        'Info' { return $script:MutedColor }
+        default { return $script:AccentColor }
     }
 }
 
@@ -432,10 +492,87 @@ function Export-InstallerTechnicalReport {
     return $reportPath
 }
 
+function Get-InstallerRepeatedText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateLength(1, 1)]
+        [string]$Character,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Count
+    )
+
+    # Every width in this module is computed from the live console width, so a
+    # narrow console can legitimately produce a non-positive count. Clamp here
+    # rather than let the string multiplication operator throw.
+    if ($Count -lt 1) { return '' }
+    return $Character * $Count
+}
+
+function Get-InstallerPadding {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$Count
+    )
+
+    return Get-InstallerRepeatedText -Character ' ' -Count $Count
+}
+
+function Get-InstallerRuleText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Screen', 'Section', 'Group')]
+        [string]$Level
+    )
+
+    if ($Level -eq 'Group') {
+        return (Get-InstallerPadding -Count $script:ContentIndent) +
+            (Get-InstallerRepeatedText -Character $script:SectionRuleCharacter -Count ($script:ConsoleWidth - (2 * $script:ContentIndent)))
+    }
+
+    $character = $script:SectionRuleCharacter
+    if ($Level -eq 'Screen') { $character = $script:ScreenRuleCharacter }
+    return Get-InstallerRepeatedText -Character $character -Count $script:ConsoleWidth
+}
+
+function Write-InstallerRule {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Screen', 'Section', 'Group')]
+        [string]$Level
+    )
+
+    $color = $script:MutedColor
+    if ($Level -eq 'Screen') { $color = $script:AccentColor }
+    Write-Host (Get-InstallerRuleText -Level $Level) -ForegroundColor $color
+}
+
+function Write-InstallerBlankLine {
+    [CmdletBinding()]
+    param(
+        [ValidateRange(1, 4)]
+        [int]$Count = 1
+    )
+
+    # One blank line separates groups inside a screen; the rest of the vertical
+    # rhythm comes from rules, so no caller needs an ad hoc empty Write-Host.
+    for ($index = 0; $index -lt $Count; $index++) {
+        Write-Host ''
+    }
+}
+
 function Write-InstallerWrappedLine {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$Prefix,
 
         [Parameter(Mandatory = $true)]
@@ -443,19 +580,26 @@ function Write-InstallerWrappedLine {
         [string]$Text,
 
         [Parameter(Mandatory = $true)]
-        [ConsoleColor]$Color
+        [ConsoleColor]$Color,
+
+        [ConsoleColor]$PrefixColor = [ConsoleColor]::Gray
     )
 
+    # The prefix doubles as the hanging indent: continuation lines are padded to
+    # the same width so every wrapped label/value pair stays in one column.
+    $effectivePrefixColor = $Color
+    if ($PSBoundParameters.ContainsKey('PrefixColor')) { $effectivePrefixColor = $PrefixColor }
+
     $remainingText = $Text.Trim()
-    $continuationPrefix = ' ' * $Prefix.Length
-    $currentPrefix = $Prefix
+    $continuationPrefix = Get-InstallerPadding -Count $Prefix.Length
     if ($remainingText.Length -eq 0) {
-        Write-Host $Prefix -ForegroundColor $Color
+        Write-Host $Prefix -ForegroundColor $effectivePrefixColor
         return
     }
 
+    $firstLine = $true
     while ($remainingText.Length -gt 0) {
-        $availableWidth = $script:ConsoleWidth - $currentPrefix.Length
+        $availableWidth = $script:ConsoleWidth - $Prefix.Length
         if ($availableWidth -lt 1) { $availableWidth = 1 }
 
         if ($remainingText.Length -le $availableWidth) {
@@ -469,79 +613,162 @@ function Write-InstallerWrappedLine {
             $remainingText = $remainingText.Substring($breakPosition).TrimStart()
         }
 
-        Write-Host ($currentPrefix + $lineText) -ForegroundColor $Color
-        $currentPrefix = $continuationPrefix
+        if ($firstLine) {
+            Write-Host $Prefix -NoNewline -ForegroundColor $effectivePrefixColor
+            $firstLine = $false
+        }
+        else {
+            Write-Host $continuationPrefix -NoNewline
+        }
+        Write-Host $lineText -ForegroundColor $Color
     }
 }
 
-function Write-InstallerBanner {
+function Write-InstallerBodyLine {
     [CmdletBinding()]
-    param()
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text,
 
-    $topRule = '+' + ('-' * ($script:ConsoleWidth - 2)) + '+'
-    $contentWidth = $script:ConsoleWidth - 4
-    $title = 'MICROSOFT RUNTIME INSTALLER'
-    $subtitle = 'SECURE DOWNLOADS | VERIFIED FILES | AUTO CLEANUP'
-    $titleLeftPadding = [math]::Floor(($contentWidth - $title.Length) / 2)
-    $subtitleLeftPadding = [math]::Floor(($contentWidth - $subtitle.Length) / 2)
-    $centeredTitle = ((' ' * $titleLeftPadding) + $title).PadRight($contentWidth)
-    $centeredSubtitle = ((' ' * $subtitleLeftPadding) + $subtitle).PadRight($contentWidth)
+        [ConsoleColor]$Color = [ConsoleColor]::Gray
+    )
 
-    Write-Host ''
-    Write-Host $topRule -ForegroundColor Cyan
-    Write-Host ('| ' + $centeredTitle + ' |') -ForegroundColor Cyan
-    Write-Host ('| ' + $centeredSubtitle + ' |') -ForegroundColor Cyan
-    Write-Host $topRule -ForegroundColor Cyan
+    Write-InstallerWrappedLine -Prefix (Get-InstallerPadding -Count $script:ContentIndent) -Text $Text -Color $Color
 }
 
-function Write-InstallerHelp {
+function Write-InstallerBulletLine {
     [CmdletBinding()]
-    param()
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Text,
 
-    Write-InstallerBanner
-    Write-Host ''
-    Write-Host 'USAGE' -ForegroundColor Cyan
-    Write-Host '  powershell.exe -ExecutionPolicy Bypass -File .\Install.ps1 [options]'
-    Write-Host '  pwsh.exe -NoProfile -File .\Install.ps1 [options]'
-    Write-Host ''
-    Write-Host 'Run without selection options to open the interactive package menu.'
-    Write-Host 'Explicit selection options bypass the menu for automation.'
-    Write-Host ''
-    Write-Host 'OPTIONS' -ForegroundColor Cyan
-    Write-Host '  -Components <list>          All (default), DotNet, VisualCpp, DirectX'
-    Write-Host '  -ExcludeComponents <list>   Remove component groups from the enabled set'
-    Write-Host '  -DotNetChannels <list>      All, or supported channels such as 8.0,10.0'
-    Write-Host '  -VisualCppVersions <list>   All, 2005, 2008, 2010, 2012, 2013, or v14'
-    Write-Host '  -KeepDownloads              Keep the Microsoft installer workspace'
-    Write-Host '  -ReportPath <path>          Write a UTF-8 developer/IT .txt report'
-    Write-Host '  -h | -Help | --help         Show help without UAC or downloads'
-    Write-Host ''
-    Write-Host 'RULES' -ForegroundColor Cyan
-    Write-Host '  * Separate multiple values with commas. Values are case-insensitive.'
-    Write-Host '  * Architecture is automatic and cannot be overridden.'
-    Write-Host '  * Explicit .NET channels must still be supported by Microsoft.'
-    Write-Host '  * .NET resolves the latest stable SDK in each selected supported channel.'
-    Write-Host '  * .NET latest.version is accepted only with Microsoft SHA-512 metadata.'
-    Write-Host '  * Visual C++ v14 tracks Microsoft''s latest supported release.'
-    Write-Host '  * Legacy Visual C++ and DirectX packages are final fixed releases.'
-    Write-Host '  * Fixed packages require reviewed SHA-256 and Microsoft signatures.'
-    Write-Host '  * Every Microsoft package source is resolved when the run starts.'
-    Write-Host '  * Microsoft progress windows may appear; they require no clicks.'
-    Write-Host '  * Packages never restart Windows automatically.'
-    Write-Host '  * Downloads are removed by default, including after failures.'
-    Write-Host ''
-    Write-Host 'EXAMPLES' -ForegroundColor Cyan
-    Write-Host '  .\Install.ps1'
-    Write-Host '  .\Install.ps1 -Components DotNet,DirectX -DotNetChannels 8.0,10.0'
-    Write-Host '  .\Install.ps1 -Components VisualCpp -VisualCppVersions 2013,v14'
-    Write-Host '  .\Install.ps1 -ExcludeComponents DirectX -KeepDownloads'
-    Write-Host '  .\Install.ps1 -Components DotNet -ReportPath "$env:USERPROFILE"'
-    Write-Host ''
-    Write-Host 'EXIT CODES' -ForegroundColor Cyan
-    Write-Host '  0     Completed successfully'
-    Write-Host '  1     Validation, download, verification, installation, or cleanup failed'
-    Write-Host '  2     Cancelled from the interactive selector before installation'
-    Write-Host '  3010  Completed successfully; restart Windows to finish'
+        [ConsoleColor]$Color = [ConsoleColor]::Gray
+    )
+
+    $prefix = (Get-InstallerPadding -Count $script:ContentIndent) + '* '
+    Write-InstallerWrappedLine -Prefix $prefix -Text $Text -Color $Color -PrefixColor $script:MutedColor
+}
+
+function Write-InstallerDetailLine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Label,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value,
+
+        [ConsoleColor]$ValueColor = [ConsoleColor]::Gray,
+
+        [ConsoleColor]$LabelColor = [ConsoleColor]::DarkGray
+    )
+
+    $labelWidth = [math]::Max($script:DetailLabelWidth, ($Label.Length + $script:ColumnGap))
+    $prefix = (Get-InstallerPadding -Count $script:ContentIndent) + $Label.PadRight($labelWidth)
+    Write-InstallerWrappedLine -Prefix $prefix -Text $Value -Color $ValueColor -PrefixColor $LabelColor
+}
+
+function Write-InstallerDefinitionLine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Term,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Description,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 110)]
+        [int]$TermWidth,
+
+        [ConsoleColor]$TermColor = [ConsoleColor]::Cyan,
+
+        [ConsoleColor]$DescriptionColor = [ConsoleColor]::Gray
+    )
+
+    $width = [math]::Max($TermWidth, ($Term.Length + $script:ColumnGap))
+    $prefix = (Get-InstallerPadding -Count $script:ContentIndent) + $Term.PadRight($width)
+    Write-InstallerWrappedLine -Prefix $prefix -Text $Description -Color $DescriptionColor -PrefixColor $TermColor
+}
+
+function Get-InstallerTermColumnWidth {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$Term
+    )
+
+    $longest = 0
+    foreach ($item in $Term) {
+        if ($item.Length -gt $longest) { $longest = $item.Length }
+    }
+    return $longest + $script:ColumnGap
+}
+
+function Write-InstallerHeading {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Title,
+
+        [ConsoleColor]$TitleColor = [ConsoleColor]::Cyan,
+
+        [AllowEmptyString()]
+        [string]$Status = '',
+
+        [ConsoleColor]$StatusColor = [ConsoleColor]::Gray
+    )
+
+    # One heading shape for the whole application: title on the left, optional
+    # state on the right. The pair drops to two lines rather than overflow when
+    # the console is too narrow to hold both, and the title itself wraps on the
+    # content indent so no caller-supplied heading can run past the width.
+    $indent = Get-InstallerPadding -Count $script:ContentIndent
+    if ([string]::IsNullOrEmpty($Status)) {
+        Write-InstallerWrappedLine -Prefix $indent -Text $Title -Color $TitleColor
+        return
+    }
+
+    $gap = $script:ConsoleWidth - $script:ContentIndent - $Title.Length - $Status.Length
+    if ($gap -lt $script:ColumnGap) {
+        Write-InstallerWrappedLine -Prefix $indent -Text $Title -Color $TitleColor
+        if (($script:ContentIndent + $Status.Length) -gt $script:ConsoleWidth) {
+            Write-InstallerWrappedLine -Prefix $indent -Text $Status -Color $StatusColor
+            return
+        }
+        Write-Host ((Get-InstallerPadding -Count ($script:ConsoleWidth - $Status.Length)) + $Status) -ForegroundColor $StatusColor
+        return
+    }
+
+    Write-Host ($indent + $Title) -NoNewline -ForegroundColor $TitleColor
+    Write-Host (Get-InstallerPadding -Count $gap) -NoNewline
+    Write-Host $Status -ForegroundColor $StatusColor
+}
+
+function Write-InstallerSectionHeader {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Title,
+
+        [AllowEmptyString()]
+        [string]$Status = ''
+    )
+
+    Write-InstallerBlankLine
+    Write-InstallerRule -Level Section
+    Write-InstallerHeading -Title $Title -TitleColor $script:TitleColor -Status $Status -StatusColor $script:AccentColor
+    Write-InstallerRule -Level Section
 }
 
 function Write-InstallerMenuKey {
@@ -549,12 +776,208 @@ function Write-InstallerMenuKey {
     param(
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [string]$Key
+        [string]$Key,
+
+        [ConsoleColor]$KeyColor = [ConsoleColor]::Cyan
     )
 
-    Write-Host '[' -NoNewline
-    Write-Host $Key -ForegroundColor Cyan -NoNewline
-    Write-Host ']' -NoNewline
+    # Square brackets mean exactly one thing everywhere in this UI: press this.
+    Write-Host '[' -NoNewline -ForegroundColor $script:MutedColor
+    Write-Host $Key -NoNewline -ForegroundColor $KeyColor
+    Write-Host ']' -NoNewline -ForegroundColor $script:MutedColor
+}
+
+function Write-InstallerMenuRow {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Key,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$State,
+
+        [Parameter(Mandatory = $true)]
+        [ConsoleColor]$StateColor,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Label,
+
+        [ConsoleColor]$LabelColor = [ConsoleColor]::Gray
+    )
+
+    Write-Host (Get-InstallerPadding -Count $script:ContentIndent) -NoNewline
+    Write-InstallerMenuKey -Key $Key
+    Write-Host (Get-InstallerPadding -Count ($script:MenuKeyWidth - ($Key.Length + 2))) -NoNewline
+    Write-Host (Get-InstallerPadding -Count $script:ColumnGap) -NoNewline
+    Write-Host $State.PadRight($script:MenuStateWidth) -NoNewline -ForegroundColor $StateColor
+    Write-Host (Get-InstallerPadding -Count $script:ColumnGap) -NoNewline
+    Write-Host $Label -ForegroundColor $LabelColor
+}
+
+function Write-InstallerMenuDetail {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text,
+
+        [ConsoleColor]$Color = [ConsoleColor]::DarkGray,
+
+        [AllowEmptyString()]
+        [string]$Label = ''
+    )
+
+    $prefix = (Get-InstallerPadding -Count $script:MenuTextColumn) + $Label
+    Write-InstallerWrappedLine -Prefix $prefix -Text $Text -Color $Color -PrefixColor $script:MutedColor
+}
+
+function Write-InstallerActionBar {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$PrimaryKey,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$PrimaryText,
+
+        [ConsoleColor]$PrimaryKeyColor = [ConsoleColor]::Green,
+
+        [AllowEmptyString()]
+        [string]$SecondaryKey = '',
+
+        [AllowEmptyString()]
+        [string]$SecondaryText = '',
+
+        [ConsoleColor]$SecondaryKeyColor = [ConsoleColor]::Yellow
+    )
+
+    # The primary action is written in the title color so the eye lands on it
+    # before the secondary action, which stays in body color on the right.
+    $gapText = Get-InstallerPadding -Count $script:ColumnGap
+    $indent = Get-InstallerPadding -Count $script:ContentIndent
+    $primaryLength = $PrimaryKey.Length + 2 + $script:ColumnGap + $PrimaryText.Length
+    $hasSecondary = (-not [string]::IsNullOrEmpty($SecondaryKey)) -and (-not [string]::IsNullOrEmpty($SecondaryText))
+
+    Write-Host $indent -NoNewline
+    Write-InstallerMenuKey -Key $PrimaryKey -KeyColor $PrimaryKeyColor
+    if (-not $hasSecondary) {
+        Write-Host ($gapText + $PrimaryText) -ForegroundColor $script:TitleColor
+        return
+    }
+
+    $secondaryLength = $SecondaryKey.Length + 2 + $script:ColumnGap + $SecondaryText.Length
+    $gap = $script:ConsoleWidth - $script:ContentIndent - $primaryLength - $secondaryLength
+    if ($gap -lt $script:ColumnGap) {
+        Write-Host ($gapText + $PrimaryText) -ForegroundColor $script:TitleColor
+        Write-Host $indent -NoNewline
+        Write-InstallerMenuKey -Key $SecondaryKey -KeyColor $SecondaryKeyColor
+        Write-Host ($gapText + $SecondaryText) -ForegroundColor $script:BodyColor
+        return
+    }
+
+    Write-Host ($gapText + $PrimaryText) -NoNewline -ForegroundColor $script:TitleColor
+    Write-Host (Get-InstallerPadding -Count $gap) -NoNewline
+    Write-InstallerMenuKey -Key $SecondaryKey -KeyColor $SecondaryKeyColor
+    Write-Host ($gapText + $SecondaryText) -ForegroundColor $script:BodyColor
+}
+
+function Write-InstallerBanner {
+    [CmdletBinding()]
+    param()
+
+    Write-InstallerBlankLine
+    Write-InstallerRule -Level Screen
+    Write-InstallerHeading -Title 'MICROSOFT RUNTIME INSTALLER' -TitleColor $script:TitleColor
+    Write-InstallerHeading -Title 'SECURE DOWNLOADS | VERIFIED FILES | AUTO CLEANUP' -TitleColor $script:MutedColor
+    Write-InstallerRule -Level Screen
+}
+
+function Write-InstallerHelp {
+    [CmdletBinding()]
+    param()
+
+    $options = @(
+        @{ Term = '-Components <list>'; Text = 'All (default), DotNet, VisualCpp, DirectX' },
+        @{ Term = '-ExcludeComponents <list>'; Text = 'Remove component groups from the enabled set' },
+        @{ Term = '-DotNetChannels <list>'; Text = 'All, or supported channels such as 8.0,10.0' },
+        @{ Term = '-VisualCppVersions <list>'; Text = 'All, 2005, 2008, 2010, 2012, 2013, or v14' },
+        @{ Term = '-KeepDownloads'; Text = 'Keep the Microsoft installer workspace' },
+        @{ Term = '-ReportPath <path>'; Text = 'Write a UTF-8 developer/IT .txt report' },
+        @{ Term = '-h | -Help | --help'; Text = 'Show help without UAC or downloads' }
+    )
+    $rules = @(
+        'Separate multiple values with commas. Values are case-insensitive.',
+        'Architecture is automatic and cannot be overridden.',
+        'Explicit .NET channels must still be supported by Microsoft.',
+        '.NET resolves the latest stable SDK in each selected supported channel.',
+        '.NET latest.version is accepted only with Microsoft SHA-512 metadata.',
+        'Visual C++ v14 tracks Microsoft''s latest supported release.',
+        'Legacy Visual C++ and DirectX packages are final fixed releases.',
+        'Fixed packages require reviewed SHA-256 and Microsoft signatures.',
+        'Every Microsoft package source is resolved when the run starts.',
+        'Microsoft progress windows may appear; they require no clicks.',
+        'Packages never restart Windows automatically.',
+        'Downloads are removed by default, including after failures.'
+    )
+    $examples = @(
+        '.\Install.ps1',
+        '.\Install.ps1 -Components DotNet,DirectX -DotNetChannels 8.0,10.0',
+        '.\Install.ps1 -Components VisualCpp -VisualCppVersions 2013,v14',
+        '.\Install.ps1 -ExcludeComponents DirectX -KeepDownloads',
+        '.\Install.ps1 -Components DotNet -ReportPath "$env:USERPROFILE"'
+    )
+    $exitCodes = @(
+        @{ Term = '0'; Text = 'Completed successfully' },
+        @{ Term = '1'; Text = 'Validation, download, verification, installation, or cleanup failed' },
+        @{ Term = '2'; Text = 'Cancelled from the interactive selector before installation' },
+        @{ Term = '3010'; Text = 'Completed successfully; restart Windows to finish' }
+    )
+    $optionWidth = Get-InstallerTermColumnWidth -Term @($options | ForEach-Object { [string]$_.Term })
+    $exitCodeWidth = Get-InstallerTermColumnWidth -Term @($exitCodes | ForEach-Object { [string]$_.Term })
+
+    Write-InstallerBanner
+    Write-InstallerBlankLine
+    Write-InstallerHeading -Title 'USAGE' -TitleColor $script:AccentColor
+    Write-InstallerRule -Level Group
+    Write-InstallerBodyLine -Text 'powershell.exe -ExecutionPolicy Bypass -File .\Install.ps1 [options]'
+    Write-InstallerBodyLine -Text 'pwsh.exe -NoProfile -File .\Install.ps1 [options]'
+    Write-InstallerBlankLine
+    Write-InstallerBodyLine -Text 'Run without selection options to open the interactive package menu.' -Color $script:MutedColor
+    Write-InstallerBodyLine -Text 'Explicit selection options bypass the menu for automation.' -Color $script:MutedColor
+
+    Write-InstallerBlankLine
+    Write-InstallerHeading -Title 'OPTIONS' -TitleColor $script:AccentColor
+    Write-InstallerRule -Level Group
+    foreach ($option in $options) {
+        Write-InstallerDefinitionLine -Term ([string]$option.Term) -Description ([string]$option.Text) -TermWidth $optionWidth -TermColor $script:TitleColor
+    }
+
+    Write-InstallerBlankLine
+    Write-InstallerHeading -Title 'RULES' -TitleColor $script:AccentColor
+    Write-InstallerRule -Level Group
+    foreach ($rule in $rules) {
+        Write-InstallerBulletLine -Text $rule
+    }
+
+    Write-InstallerBlankLine
+    Write-InstallerHeading -Title 'EXAMPLES' -TitleColor $script:AccentColor
+    Write-InstallerRule -Level Group
+    foreach ($example in $examples) {
+        Write-InstallerBodyLine -Text $example -Color $script:TitleColor
+    }
+
+    Write-InstallerBlankLine
+    Write-InstallerHeading -Title 'EXIT CODES' -TitleColor $script:AccentColor
+    Write-InstallerRule -Level Group
+    foreach ($exitCode in $exitCodes) {
+        Write-InstallerDefinitionLine -Term ([string]$exitCode.Term) -Description ([string]$exitCode.Text) -TermWidth $exitCodeWidth -TermColor $script:TitleColor
+    }
+    Write-InstallerBlankLine
 }
 
 function Write-InstallerPackageChoice {
@@ -576,17 +999,17 @@ function Write-InstallerPackageChoice {
         [string]$Detail
     )
 
-    $stateText = if ($Enabled) { '[ ON ]' } else { '[OFF ]' }
-    $stateColor = if ($Enabled) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow }
+    $stateText = 'OFF'
+    $stateColor = $script:MutedColor
+    $labelColor = $script:BodyColor
+    if ($Enabled) {
+        $stateText = 'ON'
+        $stateColor = $script:SuccessColor
+        $labelColor = $script:TitleColor
+    }
 
-    Write-Host '  ' -NoNewline
-    Write-InstallerMenuKey -Key $Key
-    Write-Host '  ' -NoNewline
-    Write-Host $stateText -ForegroundColor $stateColor -NoNewline
-    Write-Host '  ' -NoNewline
-    Write-Host $Label
-    Write-Host (' ' * 15) -NoNewline
-    Write-Host $Detail -ForegroundColor Gray
+    Write-InstallerMenuRow -Key ([string]$Key) -State $stateText -StateColor $stateColor -Label $Label -LabelColor $labelColor
+    Write-InstallerMenuDetail -Text $Detail
 }
 
 function Write-InstallerSettingChoice {
@@ -604,14 +1027,13 @@ function Write-InstallerSettingChoice {
         [ValidateNotNullOrEmpty()]
         [string]$Value,
 
-        [ConsoleColor]$ValueColor = [ConsoleColor]::Cyan
+        [ConsoleColor]$ValueColor = [ConsoleColor]::White
     )
 
-    Write-Host '  ' -NoNewline
-    Write-InstallerMenuKey -Key $Key
-    Write-Host '  ' -NoNewline
-    Write-Host $Label
-    Write-InstallerWrappedLine -Prefix '       Current selection: ' -Text $Value -Color $ValueColor
+    # Settings share the package grid but leave the on/off column empty, which
+    # is what marks them as choices rather than toggles.
+    Write-InstallerMenuRow -Key $Key -State '' -StateColor $script:BodyColor -Label $Label -LabelColor $script:BodyColor
+    Write-InstallerMenuDetail -Text $Value -Color $ValueColor -Label 'Current selection: '
 }
 
 function Write-InstallerSelectionMenu {
@@ -655,74 +1077,56 @@ function Write-InstallerSelectionMenu {
     else {
         $VisualCppVersions
     }
-    $dotNetDetailColor = if ($SelectedComponents.DotNet) { [ConsoleColor]::Cyan } else { [ConsoleColor]::Yellow }
-    $visualCppDetailColor = if ($SelectedComponents.VisualCpp) { [ConsoleColor]::Cyan } else { [ConsoleColor]::Yellow }
+    $dotNetDetailColor = if ($SelectedComponents.DotNet) { $script:TitleColor } else { $script:WarningColor }
+    $visualCppDetailColor = if ($SelectedComponents.VisualCpp) { $script:TitleColor } else { $script:WarningColor }
     $keepDetail = if ($KeepDownloads) {
         'Yes - retain files after installation'
     }
     else {
         'No - remove files after installation'
     }
-    $keepDetailColor = if ($KeepDownloads) { [ConsoleColor]::Yellow } else { [ConsoleColor]::Green }
-    $countColor = if ($selectedCount -gt 0) { [ConsoleColor]::Green } else { [ConsoleColor]::Red }
-    $headingText = '  SELECT PACKAGES'
-    $countText = '{0} OF 3 SELECTED' -f $selectedCount
-    $headingGap = $script:ConsoleWidth - $headingText.Length - $countText.Length
+    $keepDetailColor = if ($KeepDownloads) { $script:WarningColor } else { $script:SuccessColor }
+    $countColor = if ($selectedCount -gt 0) { $script:SuccessColor } else { $script:FailureColor }
 
-    Write-Host ''
-    Write-Host $headingText -ForegroundColor Cyan -NoNewline
-    Write-Host (' ' * $headingGap) -NoNewline
-    Write-Host $countText -ForegroundColor $countColor
-    Write-Host '  Press 1, 2, or 3 to turn a package group on or off.' -ForegroundColor Gray
-    Write-Host ''
+    Write-InstallerBlankLine
+    Write-InstallerHeading -Title 'SELECT PACKAGES' -TitleColor $script:AccentColor -Status ('{0} OF 3 SELECTED' -f $selectedCount) -StatusColor $countColor
+    Write-InstallerRule -Level Group
+    Write-InstallerBodyLine -Text 'Press 1, 2, or 3 to turn a package group on or off.' -Color $script:MutedColor
+    Write-InstallerBlankLine
     Write-InstallerPackageChoice -Key 1 -Enabled ([bool]$SelectedComponents.DotNet) -Label '.NET SDKs' -Detail 'Latest stable SDK in each selected supported channel'
-    Write-Host ''
     Write-InstallerPackageChoice -Key 2 -Enabled ([bool]$SelectedComponents.VisualCpp) -Label 'Visual C++ Redistributables' -Detail 'Latest supported v14 plus final 2005-2013 releases'
-    Write-Host ''
     Write-InstallerPackageChoice -Key 3 -Enabled ([bool]$SelectedComponents.DirectX) -Label 'DirectX Legacy Runtime' -Detail 'Final June 2010 legacy release'
-    Write-Host ''
-    Write-Host ''
-    Write-Host '  OPTIONAL SETTINGS' -ForegroundColor Cyan
-    Write-Host '  Press 4, 5, or K to change a setting.' -ForegroundColor Gray
-    Write-Host ''
+
+    Write-InstallerBlankLine
+    Write-InstallerHeading -Title 'OPTIONAL SETTINGS' -TitleColor $script:AccentColor
+    Write-InstallerRule -Level Group
+    Write-InstallerBodyLine -Text 'Press 4, 5, or K to change a setting.' -Color $script:MutedColor
+    Write-InstallerBlankLine
     Write-InstallerSettingChoice -Key 4 -Label 'Choose .NET SDK channels' -Value $dotNetDetail -ValueColor $dotNetDetailColor
-    Write-Host ''
     Write-InstallerSettingChoice -Key 5 -Label 'Choose Visual C++ release families' -Value $visualCppDetail -ValueColor $visualCppDetailColor
-    Write-Host ''
     Write-InstallerSettingChoice -Key K -Label 'Keep downloaded installers' -Value $keepDetail -ValueColor $keepDetailColor
-    Write-Host ''
-    Write-Host '  ' -NoNewline
-    Write-InstallerMenuKey -Key A
-    Write-Host '  Restore all default selections'
-    Write-Host ''
-    Write-Host ('  ' + ('-' * ($script:ConsoleWidth - 4))) -ForegroundColor Cyan
-    $leftAction = '  [ ENTER ]  INSTALL SELECTED PACKAGES'
-    $rightAction = '[ Q ]  CANCEL'
-    $actionGap = $script:ConsoleWidth - $leftAction.Length - $rightAction.Length
-    Write-Host '  [' -NoNewline
-    Write-Host ' ENTER ' -ForegroundColor Green -NoNewline
-    Write-Host ']  INSTALL SELECTED PACKAGES' -NoNewline
-    Write-Host (' ' * $actionGap) -NoNewline
-    Write-Host '[' -NoNewline
-    Write-Host ' Q ' -ForegroundColor Yellow -NoNewline
-    Write-Host ']  CANCEL'
-    Write-Host ('  ' + ('-' * ($script:ConsoleWidth - 4))) -ForegroundColor Cyan
+    Write-InstallerMenuRow -Key 'A' -State '' -StateColor $script:BodyColor -Label 'Restore all default selections' -LabelColor $script:BodyColor
+
+    Write-InstallerBlankLine
+    Write-InstallerRule -Level Group
+    Write-InstallerActionBar -PrimaryKey 'ENTER' -PrimaryText 'INSTALL SELECTED PACKAGES' -PrimaryKeyColor $script:SuccessColor -SecondaryKey 'Q' -SecondaryText 'CANCEL' -SecondaryKeyColor $script:WarningColor
+    Write-InstallerRule -Level Group
 
     if (-not [string]::IsNullOrWhiteSpace($FeedbackMessage)) {
-        Write-Host ''
+        Write-InstallerBlankLine
         $feedbackLabel = 'INFO'
-        $feedbackColor = [ConsoleColor]::Cyan
+        $feedbackColor = $script:AccentColor
         if ($FeedbackState -eq 'Updated') {
             $feedbackLabel = 'UPDATED'
-            $feedbackColor = [ConsoleColor]::Green
+            $feedbackColor = $script:SuccessColor
         }
         elseif ($FeedbackState -eq 'Failed') {
             $feedbackLabel = 'ERROR'
-            $feedbackColor = [ConsoleColor]::Red
+            $feedbackColor = $script:FailureColor
         }
-        Write-InstallerWrappedLine -Prefix ('  {0}: ' -f $feedbackLabel) -Text $FeedbackMessage -Color $feedbackColor
+        Write-InstallerDetailLine -Label $feedbackLabel -Value $FeedbackMessage -ValueColor $feedbackColor -LabelColor $feedbackColor
     }
-    Write-Host ''
+    Write-InstallerBlankLine
 }
 
 function Test-InstallerMenuSelection {
@@ -956,8 +1360,6 @@ function Write-InstallerSystemSummary {
     if (-not [string]::IsNullOrWhiteSpace($PowerShellEdition)) {
         $powerShellDisplay = "$PowerShellVersion ($PowerShellEdition)"
     }
-    Write-InstallerStatus -State Info -Message "System: Windows $Architecture | PowerShell $powerShellDisplay | curl $CurlVersion"
-    Write-InstallerStatus -State Info -Message ("Install plan: {0}" -f (Format-InstallerPlan -DotNetPackageCount $DotNetPackageCount -VisualCppPackageCount $VisualCppPackageCount -DirectXSelected $DirectXSelected))
     $trustControls = @('approved Microsoft HTTPS sources')
     if ($DotNetPackageCount -gt 0) { $trustControls += '.NET SHA-512 hashes' }
     if ($FixedHashPackageCount -gt 0) {
@@ -967,6 +1369,12 @@ function Write-InstallerSystemSummary {
         $trustControls += 'Microsoft digital signatures'
     }
     if ($RollingVisualCppSelected) { $trustControls += 'v14 version floor' }
+
+    # The four lines below stay status events so the technical report keeps
+    # recording them verbatim; only the section header around them is chrome.
+    Write-InstallerSectionHeader -Title 'SYSTEM AND PLAN'
+    Write-InstallerStatus -State Info -Message "System: Windows $Architecture | PowerShell $powerShellDisplay | curl $CurlVersion"
+    Write-InstallerStatus -State Info -Message ("Install plan: {0}" -f (Format-InstallerPlan -DotNetPackageCount $DotNetPackageCount -VisualCppPackageCount $VisualCppPackageCount -DirectXSelected $DirectXSelected))
     Write-InstallerStatus -State Info -Message ("Security checks: {0}" -f ($trustControls -join ' | '))
     Write-InstallerStatus -State Info -Message 'Temporary files: isolated for this run and removed automatically when finished'
 }
@@ -987,10 +1395,7 @@ function Write-InstallerSection {
     )
 
     Add-InstallerDiagnosticEvent -State Phase -Message ('Phase {0} of {1}: {2}' -f $Number, $Total, $Title)
-    Write-Host ''
-    Write-Host ('-' * $script:ConsoleWidth) -ForegroundColor DarkGray
-    Write-Host ('  PHASE {0} OF {1}  {2}' -f $Number, $Total, $Title.ToUpperInvariant()) -ForegroundColor Cyan
-    Write-Host ('-' * $script:ConsoleWidth) -ForegroundColor DarkGray
+    Write-InstallerSectionHeader -Title $Title.ToUpperInvariant() -Status ('PHASE {0} OF {1}' -f $Number, $Total)
 }
 
 function Write-InstallerStatus {
@@ -1010,17 +1415,17 @@ function Write-InstallerStatus {
     $badge = Get-InstallerStatusBadge -State $State
     $prefix = $timestampText + $badge + ' '
     $remainingText = $Message.Trim()
-    $continuationPrefix = ' ' * $prefix.Length
+    $continuationPrefix = Get-InstallerPadding -Count $prefix.Length
     $firstLine = $true
     $messageColor = switch ($State) {
-        'Failed' { [ConsoleColor]::Red }
-        'Restart' { [ConsoleColor]::Yellow }
-        'Retained' { [ConsoleColor]::Yellow }
-        default { [ConsoleColor]::Gray }
+        'Failed' { $script:FailureColor }
+        'Restart' { $script:WarningColor }
+        'Retained' { $script:WarningColor }
+        default { $script:BodyColor }
     }
 
     if ($remainingText.Length -eq 0) {
-        Write-Host $timestampText -ForegroundColor DarkGray -NoNewline
+        Write-Host $timestampText -ForegroundColor $script:MutedColor -NoNewline
         Write-Host $badge -ForegroundColor (Get-InstallerStatusColor -State $State)
         return
     }
@@ -1040,7 +1445,7 @@ function Write-InstallerStatus {
         }
 
         if ($firstLine) {
-            Write-Host $timestampText -ForegroundColor DarkGray -NoNewline
+            Write-Host $timestampText -ForegroundColor $script:MutedColor -NoNewline
             Write-Host $badge -ForegroundColor (Get-InstallerStatusColor -State $State) -NoNewline
             Write-Host (' ' + $lineText) -ForegroundColor $messageColor
             $firstLine = $false
@@ -1085,71 +1490,75 @@ function Write-InstallerCompletionScreen {
     )
 
     $heading = 'INSTALLATION NEEDS ATTENTION'
-    $headingColor = [ConsoleColor]::Red
+    $headingColor = $script:FailureColor
     $resultText = 'FAILED'
-    $resultColor = [ConsoleColor]::Red
+    $resultColor = $script:FailureColor
     $summaryText = 'The installer stopped before all selected packages completed.'
     if ($Outcome -eq 'Success') {
         $heading = 'INSTALLATION COMPLETED SUCCESSFULLY'
-        $headingColor = [ConsoleColor]::Green
+        $headingColor = $script:SuccessColor
         $resultText = 'SUCCESS'
-        $resultColor = [ConsoleColor]::Green
+        $resultColor = $script:SuccessColor
         $summaryText = 'All selected Microsoft runtime packages completed successfully.'
     }
     elseif ($Outcome -eq 'Restart') {
         $heading = 'INSTALLATION COMPLETED - RESTART REQUIRED'
-        $headingColor = [ConsoleColor]::Yellow
+        $headingColor = $script:WarningColor
         $resultText = 'SUCCESS - RESTART REQUIRED'
-        $resultColor = [ConsoleColor]::Yellow
+        $resultColor = $script:WarningColor
         $summaryText = 'All selected packages completed successfully.'
     }
 
-    $headingPadding = [math]::Floor(($script:ConsoleWidth - $heading.Length) / 2)
-    Write-Host ('=' * $script:ConsoleWidth) -ForegroundColor Cyan
-    Write-Host ((' ' * $headingPadding) + $heading) -ForegroundColor $headingColor
-    Write-Host ('=' * $script:ConsoleWidth) -ForegroundColor Cyan
-    Write-Host ''
-    Write-Host '  RESULT      ' -NoNewline
-    Write-Host $resultText -ForegroundColor $resultColor
-    Write-Host ('  PACKAGES    {0} of {1} completed' -f $CompletedPackageCount, $PlannedPackageCount)
-    Write-Host ('  ELAPSED     {0}' -f (Format-InstallerDuration -Duration $Duration))
+    # The verdict is the heading, repeated as the first label/value row so the
+    # screen reads the same whether it is skimmed or pasted into a bug report.
+    Write-InstallerRule -Level Screen
+    Write-InstallerHeading -Title $heading -TitleColor $headingColor
+    Write-InstallerRule -Level Screen
+    Write-InstallerBlankLine
+
+    Write-InstallerDetailLine -Label 'RESULT' -Value $resultText -ValueColor $resultColor
+    Write-InstallerDetailLine -Label 'PACKAGES' -Value ('{0} of {1} completed' -f $CompletedPackageCount, $PlannedPackageCount)
+    Write-InstallerDetailLine -Label 'ELAPSED' -Value (Format-InstallerDuration -Duration $Duration)
     if ($RestartRequired -and $Outcome -eq 'Failed') {
-        Write-Host '  RESTART     A completed package requested a restart.' -ForegroundColor Yellow
+        Write-InstallerDetailLine -Label 'RESTART' -Value 'A completed package requested a restart.' -ValueColor $script:WarningColor
     }
     elseif ($RestartRequired) {
-        Write-Host '  RESTART     Restart Windows manually to finish setup.' -ForegroundColor Yellow
+        Write-InstallerDetailLine -Label 'RESTART' -Value 'Restart Windows manually to finish setup.' -ValueColor $script:WarningColor
     }
     elseif ($Outcome -eq 'Failed') {
-        Write-Host '  RESTART     No restart was reported before the failure.'
+        Write-InstallerDetailLine -Label 'RESTART' -Value 'No restart was reported before the failure.'
     }
     else {
-        Write-Host '  RESTART     No restart is required.'
+        Write-InstallerDetailLine -Label 'RESTART' -Value 'No restart is required.'
     }
     if ($DownloadsRetained) {
-        Write-InstallerWrappedLine -Prefix '  DOWNLOADS   ' -Text "Downloaded files were kept at: $RetainedWorkspacePath" -Color Yellow
+        Write-InstallerDetailLine -Label 'DOWNLOADS' -Value "Downloaded files were kept at: $RetainedWorkspacePath" -ValueColor $script:WarningColor
     }
     elseif ($CleanupSucceeded) {
-        Write-Host '  DOWNLOADS   Temporary downloads were removed.' -ForegroundColor Green
+        Write-InstallerDetailLine -Label 'DOWNLOADS' -Value 'Temporary downloads were removed.' -ValueColor $script:SuccessColor
     }
     else {
-        Write-Host '  DOWNLOADS   Temporary download cleanup did not complete.' -ForegroundColor Red
+        Write-InstallerDetailLine -Label 'DOWNLOADS' -Value 'Temporary download cleanup did not complete.' -ValueColor $script:FailureColor
     }
-    Write-Host ''
-    Write-InstallerWrappedLine -Prefix '  ' -Text $summaryText -Color $headingColor
     if ($Outcome -eq 'Failed') {
         $failureText = if ([string]::IsNullOrWhiteSpace($Message)) { 'No additional failure detail was recorded.' } else { $Message }
-        Write-InstallerWrappedLine -Prefix '  ERROR       ' -Text $failureText -Color Red
-        Write-Host '  Save the technical report for detailed diagnostics before retrying.' -ForegroundColor Yellow
-    }
-    elseif ($Outcome -eq 'Restart') {
-        Write-Host '  The installer did not restart Windows automatically.'
+        Write-InstallerDetailLine -Label 'ERROR' -Value $failureText -ValueColor $script:FailureColor -LabelColor $script:FailureColor
     }
     if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
-        Write-InstallerWrappedLine -Prefix '  REPORT DIR  ' -Text (Split-Path -Parent $ReportPath) -Color Green
-        Write-InstallerWrappedLine -Prefix '  REPORT FILE ' -Text (Split-Path -Leaf $ReportPath) -Color Green
+        Write-InstallerDetailLine -Label 'REPORT DIR' -Value (Split-Path -Parent $ReportPath) -ValueColor $script:SuccessColor
+        Write-InstallerDetailLine -Label 'REPORT FILE' -Value (Split-Path -Leaf $ReportPath) -ValueColor $script:SuccessColor
     }
-    Write-Host ''
-    Write-Host ('=' * $script:ConsoleWidth) -ForegroundColor Cyan
+
+    Write-InstallerBlankLine
+    Write-InstallerRule -Level Group
+    Write-InstallerBodyLine -Text $summaryText -Color $headingColor
+    if ($Outcome -eq 'Failed') {
+        Write-InstallerBodyLine -Text 'Save the technical report for detailed diagnostics before retrying.' -Color $script:WarningColor
+    }
+    elseif ($Outcome -eq 'Restart') {
+        Write-InstallerBodyLine -Text 'The installer did not restart Windows automatically.'
+    }
+    Write-InstallerRule -Level Screen
 }
 
 function Invoke-InstallerCompletionPrompt {
@@ -1212,9 +1621,12 @@ function Invoke-InstallerCompletionPrompt {
         Write-InstallerCompletionScreen -Outcome $Outcome -CompletedPackageCount $CompletedPackageCount -PlannedPackageCount $PlannedPackageCount -Duration $Duration -CleanupSucceeded $CleanupSucceeded -RestartRequired $RestartRequired -DownloadsRetained $DownloadsRetained -RetainedWorkspacePath $RetainedWorkspacePath -Message $Message -ReportPath $reportPath
 
         if ($reportSaved) {
-            Write-Host ''
-            Write-Host '  The technical report was saved successfully.' -ForegroundColor Green
-            Write-Host '  Press any key to exit when you are ready.' -ForegroundColor Cyan
+            Write-InstallerBlankLine
+            Write-InstallerHeading -Title 'TECHNICAL REPORT' -TitleColor $script:AccentColor
+            Write-InstallerRule -Level Group
+            Write-InstallerBodyLine -Text 'The technical report was saved successfully.' -Color $script:SuccessColor
+            Write-InstallerBlankLine
+            Write-InstallerActionBar -PrimaryKey 'ANY KEY' -PrimaryText 'EXIT WHEN YOU ARE READY' -PrimaryKeyColor $script:AccentColor
             $null = & $KeyProvider
             return [pscustomobject]@{
                 ReportSaved = $true
@@ -1224,17 +1636,20 @@ function Invoke-InstallerCompletionPrompt {
         }
 
         if (-not [string]::IsNullOrWhiteSpace($reportError)) {
-            Write-Host ''
-            Write-InstallerWrappedLine -Prefix '  REPORT ERROR  ' -Text $reportError -Color Red
-            Write-Host '  Press R to try again, or press any other key to exit.' -ForegroundColor Yellow
+            Write-InstallerBlankLine
+            Write-InstallerHeading -Title 'TECHNICAL REPORT' -TitleColor $script:AccentColor
+            Write-InstallerRule -Level Group
+            Write-InstallerDetailLine -Label 'REPORT ERROR' -Value $reportError -ValueColor $script:FailureColor -LabelColor $script:FailureColor
+            Write-InstallerBlankLine
+            Write-InstallerActionBar -PrimaryKey 'R' -PrimaryText 'TRY AGAIN' -PrimaryKeyColor $script:SuccessColor -SecondaryKey 'ANY OTHER KEY' -SecondaryText 'EXIT' -SecondaryKeyColor $script:WarningColor
         }
         else {
-            Write-Host ''
-            Write-Host '  OPTIONAL TECHNICAL REPORT' -ForegroundColor Cyan
-            Write-Host '  Save a developer/IT diagnostic report before closing this window.'
-            Write-Host ''
-            Write-Host '  [ R ]  SAVE TECHNICAL REPORT' -ForegroundColor Green
-            Write-Host '  [ ANY OTHER KEY ]  EXIT' -ForegroundColor Cyan
+            Write-InstallerBlankLine
+            Write-InstallerHeading -Title 'OPTIONAL TECHNICAL REPORT' -TitleColor $script:AccentColor
+            Write-InstallerRule -Level Group
+            Write-InstallerBodyLine -Text 'Save a developer/IT diagnostic report before closing this window.' -Color $script:MutedColor
+            Write-InstallerBlankLine
+            Write-InstallerActionBar -PrimaryKey 'R' -PrimaryText 'SAVE TECHNICAL REPORT' -PrimaryKeyColor $script:SuccessColor -SecondaryKey 'ANY OTHER KEY' -SecondaryText 'EXIT' -SecondaryKeyColor $script:WarningColor
         }
 
         $keyValue = & $KeyProvider
@@ -1248,10 +1663,13 @@ function Invoke-InstallerCompletionPrompt {
         }
 
         $defaultReportPath = Resolve-InstallerReportPath -DestinationPath '' -DefaultDirectory $DefaultReportDirectory -Timestamp $Timestamp
-        Write-Host ''
-        Write-Host '  Enter a folder or a complete .txt filename.' -ForegroundColor Cyan
-        Write-InstallerWrappedLine -Prefix '  FOLDER      ' -Text (Split-Path -Parent $defaultReportPath) -Color Gray
-        Write-InstallerWrappedLine -Prefix '  FILE        ' -Text (Split-Path -Leaf $defaultReportPath) -Color Gray
+        Write-InstallerBlankLine
+        Write-InstallerHeading -Title 'REPORT DESTINATION' -TitleColor $script:AccentColor
+        Write-InstallerRule -Level Group
+        Write-InstallerBodyLine -Text 'Enter a folder or a complete .txt filename.' -Color $script:MutedColor
+        Write-InstallerDetailLine -Label 'FOLDER' -Value (Split-Path -Parent $defaultReportPath)
+        Write-InstallerDetailLine -Label 'FILE' -Value (Split-Path -Leaf $defaultReportPath)
+        Write-InstallerBlankLine
         $requestedPath = & $InputProvider 'Report path (press ENTER for the default)'
         if ($null -eq $requestedPath -or [string]::IsNullOrWhiteSpace([string]$requestedPath)) {
             $requestedPath = $defaultReportPath
@@ -1296,8 +1714,10 @@ function Write-InstallerSummary {
         [string]$Message = ''
     )
 
-    Write-Host ''
-    Write-Host ('=' * $script:ConsoleWidth) -ForegroundColor Cyan
+    Write-InstallerBlankLine
+    Write-InstallerRule -Level Screen
+    Write-InstallerHeading -Title 'INSTALLATION SUMMARY' -TitleColor $script:TitleColor
+    Write-InstallerRule -Level Screen
     switch ($Outcome) {
         'Success' {
             Write-InstallerStatus -State Ok -Message 'Installation completed successfully.'
@@ -1325,7 +1745,7 @@ function Write-InstallerSummary {
     else {
         Write-InstallerStatus -State Failed -Message 'Temporary download cleanup did not complete; review the error above.'
     }
-    Write-Host ('=' * $script:ConsoleWidth) -ForegroundColor Cyan
+    Write-InstallerRule -Level Screen
 }
 
 Export-ModuleMember -Function @(
