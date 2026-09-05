@@ -23,12 +23,79 @@ $script:VisualCppDocumentationUri = 'https://learn.microsoft.com/en-us/cpp/windo
 $script:MaximumDiscoveryDocumentBytes = 5MB
 $script:RemoteRegexTimeout = [timespan]::FromSeconds(2)
 
+function Get-InstallerPowerShell {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    $command = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $command) { return $command.Source }
+    $path = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'PowerShell could not be found.' }
+    return $path
+}
+
+function ConvertTo-InstallerArgument {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+
+    if ($Value -match '[\x00-\x1f"]') { throw 'A process argument contains a control character or quotation mark.' }
+    # Start-Process joins arguments; double trailing backslashes before the quote.
+    return '"' + [regex]::Replace($Value, '(\\+)\z', '$1$1') + '"'
+}
+
+function Get-InstallerChildArgument {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$Options
+    )
+
+    $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (ConvertTo-InstallerArgument $ScriptPath))
+    foreach ($name in $Options.Keys) {
+        if ($name -notin @('Components', 'ExcludeComponents', 'DotNetChannels', 'VisualCppVersions',
+            'KeepDownloads', 'ReportPath', 'InteractiveSession', 'DefaultReportDirectory', 'SourceRevision', 'ShowHelp')) {
+            throw "Unsupported child option: $name"
+        }
+        if ($name -in @('KeepDownloads', 'InteractiveSession', 'ShowHelp')) {
+            if ($Options[$name]) { $arguments += "-$name" }
+        }
+        else {
+            $arguments += @("-$name", (ConvertTo-InstallerArgument (@($Options[$name]) -join ',')))
+        }
+    }
+    return $arguments
+}
+
+function Resolve-InstallerOptionSet {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Configuration,
+        [string[]]$Components = 'All',
+        [AllowEmptyString()][string[]]$ExcludeComponents = '',
+        [string[]]$DotNetChannels = 'All',
+        [string[]]$VisualCppVersions = 'All'
+    )
+
+    $selected = @(Resolve-ComponentSelection ($Components -join ',') ($ExcludeComponents -join ','))
+    $channels = @(Resolve-DotNetChannelSelection ($DotNetChannels -join ','))
+    $versions = @(Get-VisualCppPackage $Configuration x64 ($VisualCppVersions -join ',')).Version | Select-Object -Unique
+    if ($selected -notcontains 'DotNet' -and $channels[0] -ne 'All') { throw '-DotNetChannels requires the DotNet component.' }
+    if ($selected -notcontains 'VisualCpp' -and ($VisualCppVersions -join ',').Trim() -ine 'All') {
+        throw '-VisualCppVersions requires the VisualCpp component.'
+    }
+    $versionText = if (($VisualCppVersions -join ',').Trim() -ieq 'All') { 'All' } else { @($versions) -join ',' }
+    return @{ Components = $selected; DotNetChannels = $channels; VisualCppVersions = $versionText }
+}
+
 function Test-AllowedMicrosoftUri {
     [CmdletBinding()]
     [OutputType([bool])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Uri
+        [Parameter(Mandatory = $true)][string]$Uri
     )
 
     try {
@@ -48,12 +115,11 @@ function Assert-MicrosoftUri {
     [CmdletBinding()]
     [OutputType([uri])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Uri
+        [Parameter(Mandatory = $true)][string]$Uri
     )
 
     if (-not (Test-AllowedMicrosoftUri -Uri $Uri)) {
-        throw "Rejected non-Microsoft or non-HTTPS URL: $Uri"
+        throw 'Rejected non-Microsoft or non-HTTPS URL.'
     }
 
     return [uri]$Uri
@@ -63,8 +129,7 @@ function Test-AllowedMicrosoftDiscoveryUri {
     [CmdletBinding()]
     [OutputType([bool])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Uri
+        [Parameter(Mandatory = $true)][string]$Uri
     )
 
     try {
@@ -84,12 +149,11 @@ function Assert-MicrosoftDiscoveryUri {
     [CmdletBinding()]
     [OutputType([uri])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Uri
+        [Parameter(Mandatory = $true)][string]$Uri
     )
 
     if (-not (Test-AllowedMicrosoftDiscoveryUri -Uri $Uri)) {
-        throw "Rejected non-Microsoft or non-HTTPS discovery URL: $Uri"
+        throw 'Rejected non-Microsoft or non-HTTPS discovery URL.'
     }
 
     return [uri]$Uri
@@ -99,9 +163,7 @@ function Test-StableVersion {
     [CmdletBinding()]
     [OutputType([bool])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Version,
-
+        [Parameter(Mandatory = $true)][string]$Version,
         [switch]$Channel
     )
 
@@ -116,8 +178,7 @@ function Test-StableDotNetSdkVersion {
     [CmdletBinding()]
     [OutputType([bool])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Version
+        [Parameter(Mandatory = $true)][string]$Version
     )
 
     if ($Version -match $script:PrereleaseVersionPattern) { return $false }
@@ -127,8 +188,7 @@ function Test-StableDotNetSdkVersion {
 function Assert-Sha512 {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Hash
+        [Parameter(Mandatory = $true)][string]$Hash
     )
 
     if ($Hash -notmatch $script:Sha512Pattern) {
@@ -139,8 +199,7 @@ function Assert-Sha512 {
 function Assert-Sha256 {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Hash
+        [Parameter(Mandatory = $true)][string]$Hash
     )
 
     if ($Hash -notmatch $script:Sha256Pattern) {
@@ -152,9 +211,7 @@ function ConvertFrom-DotNetLatestVersionText {
     [CmdletBinding()]
     [OutputType([string])]
     param(
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyString()]
-        [string]$VersionText
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$VersionText
     )
 
     $tokens = @(-split $VersionText)
@@ -172,8 +229,7 @@ function ConvertFrom-DotNetLatestVersionText {
 function Assert-InstallerFileName {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$FileName
+        [Parameter(Mandatory = $true)][string]$FileName
     )
 
     if ($FileName -notmatch $script:InstallerFileNamePattern) {
@@ -185,16 +241,10 @@ function Get-CurlArgument {
     [CmdletBinding()]
     [OutputType([string[]])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Uri,
-
-        [Parameter(Mandatory = $true)]
-        [string]$DestinationPath,
-
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
         [bool]$ShowProgress = $true,
-
-        [ValidateSet('Package', 'Discovery')]
-        [string]$UriPurpose = 'Package'
+        [ValidateSet('Package', 'Discovery')][string]$UriPurpose = 'Package'
     )
 
     $validatedUri = if ($UriPurpose -eq 'Discovery') {
@@ -239,8 +289,7 @@ function Get-CurlExecutable {
     [CmdletBinding()]
     [OutputType([string])]
     param(
-        [AllowEmptyString()]
-        [string]$SystemDirectory
+        [AllowEmptyString()][string]$SystemDirectory
     )
 
     $onWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
@@ -299,18 +348,11 @@ function Invoke-CurlDownload {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Uri,
-
-        [Parameter(Mandatory = $true)]
-        [string]$DestinationPath,
-
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
         [string]$DisplayName = 'Microsoft file',
-
         [bool]$ShowProgress = $true,
-
-        [ValidateSet('Package', 'Discovery')]
-        [string]$UriPurpose = 'Package'
+        [ValidateSet('Package', 'Discovery')][string]$UriPurpose = 'Package'
     )
 
     $validatedUri = if ($UriPurpose -eq 'Discovery') {
@@ -376,11 +418,8 @@ function Get-InstallerPackageProperty {
     [CmdletBinding()]
     [OutputType([object])]
     param(
-        [Parameter(Mandatory = $true)]
-        [object]$Package,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Name
+        [Parameter(Mandatory = $true)][object]$Package,
+        [Parameter(Mandatory = $true)][string]$Name
     )
 
     if ($Package -is [Collections.IDictionary]) {
@@ -397,12 +436,8 @@ function Get-RemoteDocumentRegexMatch {
     [CmdletBinding()]
     [OutputType([Text.RegularExpressions.Match[]])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$DocumentText,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Pattern,
-
+        [Parameter(Mandatory = $true)][string]$DocumentText,
+        [Parameter(Mandatory = $true)][string]$Pattern,
         [Text.RegularExpressions.RegexOptions]$Options = [Text.RegularExpressions.RegexOptions]::None
     )
 
@@ -418,8 +453,7 @@ function Get-MicrosoftDiscoveryPageUri {
     [CmdletBinding()]
     [OutputType([uri])]
     param(
-        [Parameter(Mandatory = $true)]
-        [object]$Package
+        [Parameter(Mandatory = $true)][object]$Package
     )
 
     $discoveryType = [string](Get-InstallerPackageProperty -Package $Package -Name 'DiscoveryType')
@@ -455,8 +489,7 @@ function Get-MicrosoftLatestPackageUri {
     [CmdletBinding()]
     [OutputType([uri])]
     param(
-        [Parameter(Mandatory = $true)]
-        [object]$Package
+        [Parameter(Mandatory = $true)][object]$Package
     )
 
     $discoveryType = [string](Get-InstallerPackageProperty -Package $Package -Name 'DiscoveryType')
@@ -485,11 +518,8 @@ function Get-VisualCppDocumentationSection {
     [CmdletBinding()]
     [OutputType([string])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$DocumentText,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Version
+        [Parameter(Mandatory = $true)][string]$DocumentText,
+        [Parameter(Mandatory = $true)][string]$Version
     )
 
     $sectionMatches = @(Get-RemoteDocumentRegexMatch -DocumentText $DocumentText -Pattern '(?m)^###[ \t]+(?<title>[^\r\n]+?)[ \t]*\r?$' -Options ([Text.RegularExpressions.RegexOptions]::CultureInvariant))
@@ -522,11 +552,8 @@ function Find-MicrosoftPayloadRecord {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$DocumentText,
-
-        [Parameter(Mandatory = $true)]
-        [object]$Package
+        [Parameter(Mandatory = $true)][string]$DocumentText,
+        [Parameter(Mandatory = $true)][object]$Package
     )
 
     if ([string]::IsNullOrWhiteSpace($DocumentText)) {
@@ -612,11 +639,8 @@ function Find-MicrosoftPayloadUri {
     [CmdletBinding()]
     [OutputType([string])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$DocumentText,
-
-        [Parameter(Mandatory = $true)]
-        [object]$Package
+        [Parameter(Mandatory = $true)][string]$DocumentText,
+        [Parameter(Mandatory = $true)][object]$Package
     )
 
     return [string](Find-MicrosoftPayloadRecord -DocumentText $DocumentText -Package $Package).Uri
@@ -626,14 +650,9 @@ function Get-MicrosoftDiscoveryDocument {
     [CmdletBinding()]
     [OutputType([string])]
     param(
-        [Parameter(Mandatory = $true)]
-        [object]$Package,
-
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath,
-
-        [Parameter(Mandatory = $true)]
-        [hashtable]$Cache
+        [Parameter(Mandatory = $true)][object]$Package,
+        [Parameter(Mandatory = $true)][string]$WorkspacePath,
+        [Parameter(Mandatory = $true)][hashtable]$Cache
     )
 
     $pageUri = Get-MicrosoftDiscoveryPageUri -Package $Package
@@ -667,14 +686,9 @@ function Resolve-MicrosoftPackageSource {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
-        [Parameter(Mandatory = $true)]
-        [psobject]$Package,
-
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath,
-
-        [Parameter(Mandatory = $true)]
-        [hashtable]$Cache
+        [Parameter(Mandatory = $true)][psobject]$Package,
+        [Parameter(Mandatory = $true)][string]$WorkspacePath,
+        [Parameter(Mandatory = $true)][hashtable]$Cache
     )
 
     $discoveryType = [string](Get-InstallerPackageProperty -Package $Package -Name 'DiscoveryType')
@@ -710,11 +724,8 @@ function Resolve-MicrosoftPackageSourceSet {
     [CmdletBinding()]
     [OutputType([pscustomobject[]])]
     param(
-        [Parameter(Mandatory = $true)]
-        [psobject[]]$Packages,
-
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath
+        [Parameter(Mandatory = $true)][psobject[]]$Packages,
+        [Parameter(Mandatory = $true)][string]$WorkspacePath
     )
 
     $cache = @{}
@@ -727,11 +738,8 @@ function Resolve-MicrosoftPackageSourceSet {
 function Assert-FileSha512 {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$LiteralPath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ExpectedHash
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedHash
     )
 
     Assert-Sha512 -Hash $ExpectedHash
@@ -745,11 +753,8 @@ function Assert-FileSha512 {
 function Assert-FileSha256 {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$LiteralPath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ExpectedHash
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedHash
     )
 
     Assert-Sha256 -Hash $ExpectedHash
@@ -763,11 +768,8 @@ function Assert-FileSha256 {
 function Confirm-DownloadedPackage {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$LiteralPath,
-
-        [Parameter(Mandatory = $true)]
-        [scriptblock]$Verification
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][scriptblock]$Verification
     )
 
     try {
@@ -791,8 +793,7 @@ function ConvertFrom-WindowsMachineType {
     [CmdletBinding()]
     [OutputType([string])]
     param(
-        [Parameter(Mandatory = $true)]
-        [uint16]$MachineType
+        [Parameter(Mandatory = $true)][uint16]$MachineType
     )
 
     switch ($MachineType) {
@@ -861,9 +862,7 @@ function Get-TargetArchitecture {
     [OutputType([string])]
     param(
         [Nullable[bool]]$Is64BitOperatingSystem = $null,
-
-        [ValidateSet('', 'X86', 'X64', 'Arm', 'Arm64')]
-        [string]$OperatingSystemArchitecture = ''
+        [ValidateSet('', 'X86', 'X64', 'Arm', 'Arm64')][string]$OperatingSystemArchitecture = ''
     )
 
     if ($PSBoundParameters.ContainsKey('OperatingSystemArchitecture')) {
@@ -927,12 +926,8 @@ function Get-InstallerResult {
     [CmdletBinding()]
     [OutputType([string])]
     param(
-        [Parameter(Mandatory = $true)]
-        [int]$ExitCode,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('DotNet', 'VisualCpp', 'DirectX', 'Extractor')]
-        [string]$InstallerType
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [Parameter(Mandatory = $true)][ValidateSet('DotNet', 'VisualCpp', 'DirectX', 'Extractor')][string]$InstallerType
     )
 
     if ($ExitCode -eq 0) { return 'Success' }
@@ -957,9 +952,7 @@ function Get-SupportedDotNetChannel {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
-        [Parameter(Mandatory = $true)]
-        [psobject]$Index,
-
+        [Parameter(Mandatory = $true)][psobject]$Index,
         [datetime]$AsOfUtc = [datetime]::UtcNow
     )
 
@@ -1016,13 +1009,8 @@ function Resolve-DotNetSdkPackage {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
-        [Parameter(Mandatory = $true)]
-        [psobject]$ReleaseMetadata,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('x86', 'x64', 'arm64')]
-        [string]$Architecture,
-
+        [Parameter(Mandatory = $true)][psobject]$ReleaseMetadata,
+        [Parameter(Mandatory = $true)][ValidateSet('x86', 'x64', 'arm64')][string]$Architecture,
         [string]$SdkVersion = ''
     )
 
@@ -1036,6 +1024,9 @@ function Resolve-DotNetSdkPackage {
     }
     if (-not (Test-StableVersion -Version $channelVersion -Channel)) {
         throw "Invalid channel version: $channelVersion"
+    }
+    if (-not $latestSdk.StartsWith($channelVersion + '.', [StringComparison]::Ordinal)) {
+        throw "SDK version $latestSdk does not belong to channel $channelVersion."
     }
 
     $sdkMatches = @()
@@ -1087,11 +1078,8 @@ function Get-DotNetLatestVersion {
     [CmdletBinding()]
     [OutputType([string])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Channel,
-
-        [Parameter(Mandatory = $true)]
-        [string]$MetadataDirectory
+        [Parameter(Mandatory = $true)][string]$Channel,
+        [Parameter(Mandatory = $true)][string]$MetadataDirectory
     )
 
     if (-not (Test-StableVersion -Version $Channel -Channel)) {
@@ -1114,13 +1102,8 @@ function Get-DotNetSdkPackage {
     [CmdletBinding()]
     [OutputType([pscustomobject[]])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('x86', 'x64', 'arm64')]
-        [string]$Architecture,
-
+        [Parameter(Mandatory = $true)][string]$WorkspacePath,
+        [Parameter(Mandatory = $true)][ValidateSet('x86', 'x64', 'arm64')][string]$Architecture,
         [datetime]$AsOfUtc = [datetime]::UtcNow
     )
 
@@ -1191,43 +1174,14 @@ function Get-DotNetSdkPackage {
     return $packages
 }
 
-function Receive-DotNetSdkPackage {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [psobject]$Package,
-
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath
-    )
-
-    Assert-InstallerFileName -FileName ([string]$Package.FileName)
-    Assert-Sha512 -Hash ([string]$Package.Sha512)
-    $destinationPath = Join-Path ([IO.Path]::GetFullPath($WorkspacePath)) ([string]$Package.FileName)
-    $null = Invoke-CurlDownload -Uri ([string]$Package.Uri) -DestinationPath $destinationPath -DisplayName ([string]$Package.Name)
-    Confirm-DownloadedPackage -LiteralPath $destinationPath -Verification {
-        Assert-FileSha512 -LiteralPath $destinationPath -ExpectedHash ([string]$Package.Sha512)
-    }
-    return $destinationPath
-}
-
 function ConvertTo-CanonicalSelection {
     [CmdletBinding()]
     [OutputType([string[]])]
     param(
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyString()]
-        [string]$Value,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$AllowedValues,
-
-        [Parameter(Mandatory = $true)]
-        [string]$OptionName,
-
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value,
+        [Parameter(Mandatory = $true)][string[]]$AllowedValues,
+        [Parameter(Mandatory = $true)][string]$OptionName,
         [switch]$AllowEmpty,
-
         [switch]$ExpandAll
     )
 
@@ -1274,9 +1228,7 @@ function Resolve-ComponentSelection {
     [OutputType([string[]])]
     param(
         [string]$Components = 'All',
-
-        [AllowEmptyString()]
-        [string]$ExcludeComponents = ''
+        [AllowEmptyString()][string]$ExcludeComponents = ''
     )
 
     $allowedComponents = @('DotNet', 'VisualCpp', 'DirectX')
@@ -1315,6 +1267,7 @@ function Resolve-DotNetChannelSelection {
     $seen = @{}
     $channels = @()
     foreach ($token in $tokens) {
+        if ($token -match '\A\d{1,3}\z') { $token += '.0' }
         if (-not (Test-StableVersion -Version $token -Channel)) {
             throw "Invalid stable .NET channel: $token"
         }
@@ -1332,9 +1285,7 @@ function Select-DotNetSdkPackage {
     [CmdletBinding()]
     [OutputType([pscustomobject[]])]
     param(
-        [Parameter(Mandatory = $true)]
-        [psobject[]]$Packages,
-
+        [Parameter(Mandatory = $true)][psobject[]]$Packages,
         [string]$ChannelSelection = 'All'
     )
 
@@ -1359,13 +1310,8 @@ function Get-VisualCppPackage {
     [CmdletBinding()]
     [OutputType([pscustomobject[]])]
     param(
-        [Parameter(Mandatory = $true)]
-        [hashtable]$Configuration,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('x86', 'x64', 'arm64')]
-        [string]$OperatingSystemArchitecture,
-
+        [Parameter(Mandatory = $true)][hashtable]$Configuration,
+        [Parameter(Mandatory = $true)][ValidateSet('x86', 'x64', 'arm64')][string]$OperatingSystemArchitecture,
         [string]$VersionSelection = 'All'
     )
 
@@ -1468,8 +1414,7 @@ function Get-DirectXPackage {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
-        [Parameter(Mandatory = $true)]
-        [hashtable]$Configuration
+        [Parameter(Mandatory = $true)][hashtable]$Configuration
     )
 
     if (-not $Configuration.ContainsKey('DirectX')) {
@@ -1510,8 +1455,7 @@ function Test-MicrosoftSignerSubject {
     [CmdletBinding()]
     [OutputType([bool])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Subject
+        [Parameter(Mandatory = $true)][string]$Subject
     )
 
     return $Subject -match '(?:\A|,\s*)O=Microsoft Corporation(?:,|\z)'
@@ -1520,8 +1464,7 @@ function Test-MicrosoftSignerSubject {
 function Assert-MicrosoftAuthenticodeSignature {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$LiteralPath
+        [Parameter(Mandatory = $true)][string]$LiteralPath
     )
 
     $signature = Get-AuthenticodeSignature -LiteralPath $LiteralPath -ErrorAction Stop
@@ -1539,8 +1482,7 @@ function Get-VisualCppFileVersion {
     [CmdletBinding()]
     [OutputType([version])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$LiteralPath
+        [Parameter(Mandatory = $true)][string]$LiteralPath
     )
 
     $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($LiteralPath)
@@ -1566,8 +1508,7 @@ function Resolve-VisualCppFileVersion {
     [CmdletBinding()]
     [OutputType([version])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$LiteralPath
+        [Parameter(Mandatory = $true)][string]$LiteralPath
     )
 
     # Do not trust PE metadata until Windows has validated Microsoft's
@@ -1580,11 +1521,8 @@ function Assert-VisualCppVersionPolicy {
     [CmdletBinding()]
     [OutputType([bool])]
     param(
-        [Parameter(Mandatory = $true)]
-        [psobject]$Package,
-
-        [Parameter(Mandatory = $true)]
-        [version]$ActualVersion
+        [Parameter(Mandatory = $true)][psobject]$Package,
+        [Parameter(Mandatory = $true)][version]$ActualVersion
     )
 
     $actualText = $ActualVersion.ToString(4)
@@ -1629,9 +1567,7 @@ function Test-SafeInstallerWorkspacePath {
     [CmdletBinding()]
     [OutputType([bool])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath,
-
+        [Parameter(Mandatory = $true)][string]$WorkspacePath,
         [string]$TempPath = [IO.Path]::GetTempPath()
     )
 
@@ -1674,8 +1610,7 @@ function New-InstallerWorkspace {
 function Remove-InstallerWorkspace {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath
+        [Parameter(Mandatory = $true)][string]$WorkspacePath
     )
 
     if (-not (Test-SafeInstallerWorkspacePath -WorkspacePath $WorkspacePath)) {
@@ -1696,18 +1631,10 @@ function Invoke-InstallerPackage {
     [CmdletBinding()]
     [OutputType([string])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Name,
-
-        [Parameter(Mandatory = $true)]
-        [string]$LiteralPath,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$Arguments,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('DotNet', 'VisualCpp', 'DirectX', 'Extractor')]
-        [string]$InstallerType
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][ValidateSet('DotNet', 'VisualCpp', 'DirectX', 'Extractor')][string]$InstallerType
     )
 
     if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
@@ -1747,132 +1674,73 @@ function Invoke-InstallerPackage {
     return $result
 }
 
-function Receive-SignedMicrosoftPackage {
+function Receive-InstallerPackage {
     [CmdletBinding()]
     [OutputType([string])]
     param(
-        [Parameter(Mandatory = $true)]
-        [psobject]$Package,
-
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath
+        [Parameter(Mandatory = $true)][psobject]$Package,
+        [Parameter(Mandatory = $true)][string]$WorkspacePath,
+        [Parameter(Mandatory = $true)][ValidateSet('DotNet', 'VisualCpp', 'DirectX')][string]$InstallerType
     )
 
-    Assert-InstallerFileName -FileName ([string]$Package.FileName)
-    $expectedSha256 = [string](Get-InstallerPackageProperty -Package $Package -Name 'Sha256')
-    if (-not [string]::IsNullOrWhiteSpace($expectedSha256)) {
-        Assert-Sha256 -Hash $expectedSha256
-    }
-    $destinationPath = Join-Path ([IO.Path]::GetFullPath($WorkspacePath)) ([string]$Package.FileName)
-    $null = Invoke-CurlDownload -Uri ([string]$Package.Uri) -DestinationPath $destinationPath -DisplayName ([string]$Package.Name)
+    Assert-InstallerFileName -FileName $Package.FileName
+    $verificationType = $InstallerType
+    $destinationPath = Join-Path ([IO.Path]::GetFullPath($WorkspacePath)) $Package.FileName
+    $null = Invoke-CurlDownload -Uri $Package.Uri -DestinationPath $destinationPath -DisplayName $Package.Name
+    # Every trust check belongs inside the deletion guard, including the v14 floor.
     Confirm-DownloadedPackage -LiteralPath $destinationPath -Verification {
-        if (-not [string]::IsNullOrWhiteSpace($expectedSha256)) {
-            Assert-FileSha256 -LiteralPath $destinationPath -ExpectedHash $expectedSha256
+        if ($verificationType -eq 'DotNet') {
+            Assert-FileSha512 -LiteralPath $destinationPath -ExpectedHash $Package.Sha512
         }
-        Assert-MicrosoftAuthenticodeSignature -LiteralPath $destinationPath
+        else {
+            if ($Package.VersionPolicy -eq 'Fixed') {
+                Assert-FileSha256 -LiteralPath $destinationPath -ExpectedHash $Package.Sha256
+            }
+            Assert-MicrosoftAuthenticodeSignature -LiteralPath $destinationPath
+            if ($verificationType -eq 'VisualCpp') {
+                $version = Get-VisualCppFileVersion -LiteralPath $destinationPath
+                $null = Assert-VisualCppVersionPolicy -Package $Package -ActualVersion $version
+                Write-InstallerStatus -State Verify -Message "$($Package.Name) | File version $version"
+            }
+        }
     }
     return $destinationPath
 }
 
-function Invoke-DotNetSdkInstallation {
+function Invoke-RuntimeInstallation {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [psobject[]]$Packages,
-
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath,
-
-        [Parameter(Mandatory = $true)]
-        [ref]$CompletedPackageCount,
-
-        [Parameter(Mandatory = $true)]
-        [ref]$RestartRequired
+        [Parameter(Mandatory = $true)][psobject[]]$Packages,
+        [Parameter(Mandatory = $true)][string]$WorkspacePath,
+        [Parameter(Mandatory = $true)][ValidateSet('DotNet', 'VisualCpp', 'DirectX')][string]$InstallerType,
+        [Parameter(Mandatory = $true)][ref]$CompletedPackageCount,
+        [Parameter(Mandatory = $true)][ref]$RestartRequired
     )
 
-    for ($packageIndex = 0; $packageIndex -lt $Packages.Count; $packageIndex++) {
-        $package = $Packages[$packageIndex]
-        Write-InstallerStatus -State Info -Message (".NET package {0} of {1}: {2}" -f ($packageIndex + 1), $Packages.Count, $package.Name)
-        $installerPath = Receive-DotNetSdkPackage -Package $package -WorkspacePath $WorkspacePath
-        $result = Invoke-InstallerPackage -Name ([string]$package.Name) -LiteralPath $installerPath -Arguments @($package.Arguments) -InstallerType DotNet
+    foreach ($package in $Packages) {
+        $installerPath = Receive-InstallerPackage -Package $package -WorkspacePath $WorkspacePath -InstallerType $InstallerType
+        if ($InstallerType -eq 'DirectX') {
+            Assert-InstallerFileName -FileName $package.SetupName
+            $extractionPath = Join-Path $WorkspacePath 'directx-extracted'
+            $null = New-Item -Path $extractionPath -ItemType Directory -ErrorAction Stop
+            $null = Invoke-InstallerPackage -Name "$($package.Name) extraction" -LiteralPath $installerPath -Arguments @('/Q', ('/T:"{0}"' -f $extractionPath)) -InstallerType Extractor
+            $installerPath = Join-Path $extractionPath $package.SetupName
+            Confirm-DownloadedPackage -LiteralPath $installerPath -Verification {
+                Assert-MicrosoftAuthenticodeSignature -LiteralPath $installerPath
+            }
+            $arguments = @('/silent')
+        }
+        else {
+            $arguments = @($package.Arguments)
+        }
+        $result = Invoke-InstallerPackage -Name $package.Name -LiteralPath $installerPath -Arguments $arguments -InstallerType $InstallerType
         if ($result -eq 'RestartRequired') { $RestartRequired.Value = $true }
-        $CompletedPackageCount.Value = [int]$CompletedPackageCount.Value + 1
+        $CompletedPackageCount.Value++
     }
-}
-
-function Invoke-VisualCppInstallation {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [psobject[]]$Packages,
-
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath,
-
-        [Parameter(Mandatory = $true)]
-        [ref]$CompletedPackageCount,
-
-        [Parameter(Mandatory = $true)]
-        [ref]$RestartRequired
-    )
-
-    for ($packageIndex = 0; $packageIndex -lt $Packages.Count; $packageIndex++) {
-        $package = $Packages[$packageIndex]
-        Write-InstallerStatus -State Info -Message ("Visual C++ package {0} of {1}: {2}" -f ($packageIndex + 1), $Packages.Count, $package.Name)
-        $installerPath = Receive-SignedMicrosoftPackage -Package $package -WorkspacePath $WorkspacePath
-        # Receive-SignedMicrosoftPackage verified the signature immediately
-        # before this structural PE version read, so avoid a duplicate UI line.
-        $fileVersion = Get-VisualCppFileVersion -LiteralPath $installerPath
-        $null = Assert-VisualCppVersionPolicy -Package $package -ActualVersion $fileVersion
-        Write-InstallerStatus -State Verify -Message ("File version accepted: {0} | {1}" -f $fileVersion.ToString(4), $package.Name)
-        $displayName = '{0} [version {1}]' -f $package.Name, $fileVersion.ToString(4)
-        $result = Invoke-InstallerPackage -Name $displayName -LiteralPath $installerPath -Arguments @($package.Arguments) -InstallerType VisualCpp
-        if ($result -eq 'RestartRequired') { $RestartRequired.Value = $true }
-        $CompletedPackageCount.Value = [int]$CompletedPackageCount.Value + 1
-    }
-}
-
-function Invoke-DirectXInstallation {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [psobject]$Package,
-
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath,
-
-        [Parameter(Mandatory = $true)]
-        [ref]$CompletedPackageCount,
-
-        [Parameter(Mandatory = $true)]
-        [ref]$RestartRequired
-    )
-
-    $setupName = [string]$Package.SetupName
-    Assert-InstallerFileName -FileName $setupName
-
-    Write-InstallerStatus -State Info -Message ("DirectX package 1 of 1: {0}" -f $Package.Name)
-    $extractorPath = Receive-SignedMicrosoftPackage -Package $Package -WorkspacePath $WorkspacePath
-    $extractionPath = Join-Path ([IO.Path]::GetFullPath($WorkspacePath)) 'directx-extracted'
-    $null = New-Item -Path $extractionPath -ItemType Directory -ErrorAction Stop
-    $extractResult = Invoke-InstallerPackage -Name "$($Package.Name) extraction" -LiteralPath $extractorPath -Arguments @('/Q', ('/T:"{0}"' -f $extractionPath)) -InstallerType Extractor
-
-    $setupPath = Join-Path $extractionPath $setupName
-    if (-not (Test-Path -LiteralPath $setupPath -PathType Leaf)) {
-        throw "DirectX extraction did not produce $setupName."
-    }
-    Confirm-DownloadedPackage -LiteralPath $setupPath -Verification {
-        Assert-MicrosoftAuthenticodeSignature -LiteralPath $setupPath
-    }
-    $setupResult = Invoke-InstallerPackage -Name ([string]$Package.Name) -LiteralPath $setupPath -Arguments @('/silent') -InstallerType DirectX
-
-    if ($extractResult -eq 'RestartRequired' -or $setupResult -eq 'RestartRequired') {
-        $RestartRequired.Value = $true
-    }
-    $CompletedPackageCount.Value = [int]$CompletedPackageCount.Value + 1
 }
 
 Export-ModuleMember -Function @(
+    'Get-InstallerPowerShell', 'Get-InstallerChildArgument', 'ConvertTo-InstallerArgument', 'Resolve-InstallerOptionSet',
     'Assert-FileSha256',
     'Assert-FileSha512',
     'Assert-InstallerFileName',
@@ -1893,13 +1761,10 @@ Export-ModuleMember -Function @(
     'Get-SupportedDotNetChannel',
     'Get-TargetArchitecture',
     'Get-VisualCppPackage',
-    'Invoke-DirectXInstallation',
     'Invoke-CurlDownload',
-    'Invoke-DotNetSdkInstallation',
+    'Invoke-RuntimeInstallation',
     'Invoke-InstallerPackage',
-    'Invoke-VisualCppInstallation',
     'New-InstallerWorkspace',
-    'Receive-DotNetSdkPackage',
     'Remove-InstallerWorkspace',
     'Resolve-ComponentSelection',
     'Resolve-DotNetChannelSelection',

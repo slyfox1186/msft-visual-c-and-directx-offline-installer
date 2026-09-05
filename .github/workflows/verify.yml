@@ -1,0 +1,48 @@
+name: Verify installer
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        shell: [powershell, pwsh]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Parse all PowerShell files
+        run: |
+          Get-ChildItem -Recurse -File -Include *.ps1,*.psm1,*.psd1 | ForEach-Object {
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+      - name: Run regressions
+        run: |
+          $engine = (Get-Process -Id $PID).Path
+          Get-ChildItem tests/*.Tests.ps1 | ForEach-Object {
+            & $engine -NoProfile -ExecutionPolicy Bypass -File $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Regression failed: $($_.Name)" }
+          }
+      - name: Static analysis and PowerShell 5.1 compatibility
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
+          $issues = @(Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1)
+          if ($issues.Count) { throw ($issues | Out-String) }
+  install:
+    needs: regression
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Install all packages on the disposable Windows runner
+        shell: pwsh
+        run: |
+          ./Install.ps1 -Components All -ReportPath "$env:RUNNER_TEMP/runtime-report.txt"
+          if ($LASTEXITCODE -notin @(0, 3010)) { throw "Installer failed: $LASTEXITCODE" }
+          Get-Content "$env:RUNNER_TEMP/runtime-report.txt"
+          exit 0

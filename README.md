@@ -126,14 +126,33 @@ Architecture is detected automatically and cannot be overridden.
 
 ## Verification
 
-The project has no build step. Run the offline help and configured static analysis before submitting changes:
+The project has no build step or test-framework dependency. Run the regression
+scripts, offline help, and configured static analysis before submitting changes:
 
 ```powershell
+pwsh -NoProfile -File tests/ConsoleUI.Tests.ps1
+pwsh -NoProfile -File tests/Launcher.Tests.ps1
+pwsh -NoProfile -File tests/PackageExecution.Tests.ps1
+pwsh -NoProfile -File tests/RuntimeInstaller.Tests.ps1
 pwsh -NoProfile -File ./Install.ps1 -Help
 pwsh -NoProfile -Command 'Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1'
 ```
 
-Every `.ps1`, `.psm1`, and `.psd1` file should also be parsed before submission. Linux checks can verify parsing, help output, and static analysis, but they do not prove native Windows behavior. Use a disposable Windows environment to test UAC, Authenticode, installer switches, exit codes, cleanup, and console rendering.
+The tests cover selection and process forwarding, malformed metadata, rejected
+downloads and signatures, hashes, version floors, restart codes, guarded cleanup,
+menu input, and report privacy and retries. Package execution tests simulate the
+network and OS boundaries; they never install anything locally.
+
+Every `.ps1`, `.psm1`, and `.psd1` file should also be parsed before submission.
+GitHub Actions runs these checks under Windows PowerShell 5.1 and PowerShell 7,
+then installs the full package selection on a disposable Windows runner for
+pushes. Linux checks alone do not prove native Windows behavior. Interactive UAC
+and console keyboard/display behavior still require a Windows desktop smoke test.
+
+The implementation keeps one console text wrapper, shared process argument
+handling, and a single package installation loop. Package discovery and trust
+checks remain in `src/RuntimeInstaller.psm1`; Microsoft installer payloads are
+never committed.
 
 ## Feedback and problems
 
