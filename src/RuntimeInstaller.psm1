@@ -238,17 +238,39 @@ function Get-CurlArgument {
 function Get-CurlExecutable {
     [CmdletBinding()]
     [OutputType([string])]
-    param()
+    param(
+        [AllowEmptyString()]
+        [string]$SystemDirectory
+    )
 
-    $commandName = 'curl'
-    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        $commandName = 'curl.exe'
+    $onWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    $commandName = if ($onWindows) { 'curl.exe' } else { 'curl' }
+
+    # Windows 10 1803 and later ship curl.exe as an operating system component in
+    # System32. Prefer that copy: this executable enforces every transport
+    # guarantee the installer depends on (HTTPS-only protocol and redirect
+    # policy, TLS floor, redirect ceiling, effective-URL reporting), so resolving
+    # it through PATH would let any writable PATH entry ahead of System32 supply
+    # a different downloader. PATH remains the documented fallback for hosts
+    # without the component.
+    $preferredDirectory = $SystemDirectory
+    if (-not $PSBoundParameters.ContainsKey('SystemDirectory')) {
+        $preferredDirectory = ''
+        if ($onWindows -and -not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+            $preferredDirectory = Join-Path $env:SystemRoot 'System32'
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($preferredDirectory)) {
+        $systemCurlPath = Join-Path $preferredDirectory $commandName
+        if (Test-Path -LiteralPath $systemCurlPath -PathType Leaf) {
+            return [IO.Path]::GetFullPath($systemCurlPath)
+        }
     }
 
     $command = Get-Command -Name $commandName -CommandType Application -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if ($null -eq $command) {
-        throw "$commandName is required but was not found in PATH."
+        throw "$commandName is required but was not found in the operating system directory or in PATH."
     }
 
     return $command.Source
@@ -1861,6 +1883,7 @@ Export-ModuleMember -Function @(
     'Assert-VisualCppVersionPolicy',
     'Find-MicrosoftPayloadUri',
     'Get-CurlArgument',
+    'Get-CurlExecutable',
     'Get-CurlVersion',
     'Get-DirectXPackage',
     'Get-DotNetLatestVersion',

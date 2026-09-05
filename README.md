@@ -108,7 +108,8 @@ Architecture is detected automatically and cannot be overridden.
 - Windows on x86, x64, or ARM64
 - Administrator access
 - Windows PowerShell 5.1 or PowerShell 7
-- `curl.exe` available in `PATH`
+- `curl.exe`, which Windows 10 version 1803 and later ship in `System32` (the installer prefers
+  that operating system copy and falls back to `PATH` on older builds)
 - Internet access to GitHub and the approved Microsoft hosts
 - Enough disk space for the selected SDKs and runtimes
 

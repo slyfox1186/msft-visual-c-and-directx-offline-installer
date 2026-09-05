@@ -108,6 +108,31 @@ function ConvertTo-DotNetChannelText {
     return $tokens -join ','
 }
 
+function Get-PreferredCurlExecutable {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    # Windows 10 1803 and later ship curl.exe in System32 as an operating system
+    # component. Prefer it so a writable PATH entry ahead of System32 cannot
+    # substitute the downloader that enforces the HTTPS-only protocol and
+    # redirect policy, TLS floor, and effective-URL reporting used below.
+    if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+        $systemCurlPath = Join-Path $env:SystemRoot 'System32\curl.exe'
+        if (Test-Path -LiteralPath $systemCurlPath -PathType Leaf) {
+            return [IO.Path]::GetFullPath($systemCurlPath)
+        }
+    }
+
+    $curlCommand = Get-Command -Name 'curl.exe' -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -eq $curlCommand) {
+        throw 'curl.exe is required but was not found in the Windows system directory or in PATH.'
+    }
+
+    return $curlCommand.Source
+}
+
 function Get-PreferredPowerShellExecutable {
     [CmdletBinding()]
     [OutputType([string])]
@@ -251,7 +276,7 @@ try {
             throw "Rejected Start.ps1 URL: $startUri"
         }
 
-        $curlCommand = Get-Command -Name 'curl.exe' -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        $curlExecutable = Get-PreferredCurlExecutable
         $curlArguments = @(
             '--fail', '--location', '--max-redirs', '10',
             '--proto', '=https', '--proto-redir', '=https', '--tlsv1.2',
@@ -260,7 +285,7 @@ try {
             '--show-error', '--output', $temporaryStartPath,
             '--write-out', '%{url_effective}', '--url', $startUri
         )
-        $effectiveUriText = (& $curlCommand.Source @curlArguments | Out-String).Trim()
+        $effectiveUriText = (& $curlExecutable @curlArguments | Out-String).Trim()
         if ($LASTEXITCODE -ne 0) {
             throw "curl.exe failed with exit code $LASTEXITCODE while downloading Start.ps1."
         }
